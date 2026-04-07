@@ -1,2 +1,9 @@
-# Titan
-High-performance Agent-Based LOB Simulator (CPU Core + Zero-Copy GPU Bridge). Built for RL experiments, HFT backtesting, market regulators, and Econophysics. Features advanced SBI calibration modules to create highly accurate Market Digital Twins.
+# Titan: Generative Market Microstructure Simulator
+
+Titan is a next-generation, high-throughput Limit Order Book simulator designed for **Agent-Based Modeling**. Engineered from the ground up with Data-Oriented Design, it bridges a strictly deterministic C++ matching engine with PyTorch via a Zero-Copy memory interface.
+
+Titan goes beyond traditional backtesting by providing the infrastructure to create highly precise **Market Digital Twins**.
+
+**License:** [BSD 3-Clause](LICENSE)
+
+**WORK IN PROGRESS**
