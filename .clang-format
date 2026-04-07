@@ -1,0 +1,23 @@
+# .clang-format
+Language: Cpp
+Standard: c++20
+BasedOnStyle: Google
+
+ColumnLimit: 120
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+AccessModifierOffset: -4
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+
+AlignConsecutiveDeclarations: false
+AlignConsecutiveAssignments: false
+
+SortIncludes: true
