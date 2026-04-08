@@ -1,5 +1,7 @@
 #pragma once
 
+#include <immintrin.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -46,20 +48,39 @@ public:
 // ========================================================================
 class OrderPoolAllocator {
 private:
-    OrderNode* nodes_{nullptr};
-    Handle* free_list_{nullptr};
-    uint32_t head_{0};
-    uint32_t capacity_{0};
+    OrderNode* nodes_ = nullptr;
+    Handle* free_list_ = nullptr;
+    std::size_t head_ = 0;
+    uint32_t capacity_ = 0;
 
 public:
     OrderPoolAllocator() = default;
 
     void init(OrderNode* nodes, Handle* free_list, uint32_t capacity) noexcept;
 
-    [[nodiscard]] Handle allocate() noexcept;
-    void free(Handle handle) noexcept;
+    [[nodiscard]] inline Handle allocate() noexcept {
+        if (head_ == 0) [[unlikely]] {
+            return NULL_HANDLE;
+        }
 
-    [[nodiscard]] inline OrderNode& get_node(Handle handle) noexcept { return nodes_[handle]; }
+        const Handle h = free_list_[--head_];
+
+        nodes_[h].next = NULL_HANDLE;
+        nodes_[h].prev = NULL_HANDLE;
+
+        return h;
+    }
+
+    inline void free(Handle handle) noexcept {
+        // Prefetch the node data to L1 cache.
+        // Helps if we need to access this node's generation immediately after.
+        _mm_prefetch(reinterpret_cast<const char*>(&nodes_[handle]), _MM_HINT_T0);
+
+        nodes_[handle].generation++;
+        free_list_[head_++] = handle;
+    }
+
+    [[nodiscard]] inline std::size_t size() const noexcept { return head_; }
 };
 
 // ========================================================================
@@ -90,4 +111,4 @@ public:
     [[nodiscard]] inline uint32_t max_orders() const noexcept { return max_orders_per_env_; }
 };
 
-}  
+}  // namespace titan::core
