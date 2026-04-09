@@ -101,7 +101,22 @@ message(STATUS "[Titan] Fetching Google Benchmark...")
 FetchContent_MakeAvailable(googlebenchmark)
 
 # ==============================================================================
-# 6. Core Library (Titan)
+# 6. Dependencies: Google Test
+# ==============================================================================
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.14.0
+)
+
+# Для Windows: форсируем использование статических библиотек (Mу/MT)
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+
+message(STATUS "[Titan] Fetching Google Test...")
+FetchContent_MakeAvailable(googletest)
+
+# ==============================================================================
+# 7. Core Library (Titan)
 # ==============================================================================
 add_library(titan_core STATIC)
 
@@ -119,6 +134,21 @@ target_sources(titan_core PRIVATE
 target_compile_definitions(titan_core PUBLIC TITAN_SYSTEM_L3_BYTES=${TITAN_SYSTEM_L3_BYTES})
 
 # ==============================================================================
-# 7. Subdirectories
+# 8. Subdirectories
 # ==============================================================================
 add_subdirectory(benchmarks)
+
+# ==============================================================================
+# 9. Tests
+# ==============================================================================
+add_executable(titan_lob_tests
+    tests/lob_state_tests.cpp
+)
+
+target_link_libraries(titan_lob_tests PRIVATE
+    titan_core
+    gtest_main
+)
+
+include(GoogleTest)
+gtest_discover_tests(titan_lob_tests)
