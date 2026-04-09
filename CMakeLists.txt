@@ -109,7 +109,6 @@ FetchContent_Declare(
     GIT_TAG        v1.14.0
 )
 
-# Для Windows: форсируем использование статических библиотек (Mу/MT)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 
 message(STATUS "[Titan] Fetching Google Test...")
@@ -136,7 +135,6 @@ target_compile_definitions(titan_core PUBLIC TITAN_SYSTEM_L3_BYTES=${TITAN_SYSTE
 # ==============================================================================
 # 8. Subdirectories
 # ==============================================================================
-add_subdirectory(benchmarks)
 
 # ==============================================================================
 # 9. Tests
@@ -159,3 +157,25 @@ target_link_libraries(titan_memory_tests PRIVATE titan_core gtest_main)
 include(GoogleTest)
 gtest_discover_tests(titan_lob_tests)
 gtest_discover_tests(titan_memory_tests)
+
+# ==============================================================================
+# 10. Benchmarks
+# ==============================================================================
+add_executable(titan_lob_bench
+    benchmarks/lob_state_bench.cpp
+)
+
+target_link_libraries(titan_lob_bench PRIVATE
+    titan_core
+    benchmark::benchmark
+)
+
+add_executable(titan_memory_bench
+    benchmarks/memory_bench.cpp
+)
+
+target_link_libraries(titan_memory_bench PRIVATE
+    titan_core
+    benchmark::benchmark
+    Boost::boost
+)
