@@ -29,6 +29,12 @@ void OrderPoolAllocator::init(OrderNode* nodes, Handle* free_list, uint32_t capa
         nodes_[i].generation = 0;
         nodes_[i].next = NULL_HANDLE;
         nodes_[i].prev = NULL_HANDLE;
+
+        // Zero out payload fields for strictly deterministic initialization
+        nodes_[i].owner_id = 0;
+        nodes_[i].price = 0;
+        nodes_[i].quantity = 0;
+        nodes_[i].side = 0;
     }
 }
 

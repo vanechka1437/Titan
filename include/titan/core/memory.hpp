@@ -80,6 +80,10 @@ public:
         free_list_[head_++] = handle;
     }
 
+    [[nodiscard]] inline OrderNode& get_node(Handle handle) noexcept { return nodes_[handle]; }
+
+    [[nodiscard]] inline const OrderNode& get_node(Handle handle) const noexcept { return nodes_[handle]; }
+
     [[nodiscard]] inline std::size_t size() const noexcept { return head_; }
 };
 

@@ -16,7 +16,6 @@
 namespace titan::core {
 
 using Price = uint32_t;
-using Quantity = uint32_t;
 using OrderId = uint64_t;
 
 // ============================================================================
@@ -25,7 +24,7 @@ using OrderId = uint64_t;
 struct alignas(16) PriceLevel {
     Handle head{NULL_HANDLE};
     Handle tail{NULL_HANDLE};
-    Quantity total_qty{0};
+    OrderQty total_qty{0};
     Price actual_price{0};  // Tag for O(1) lazy clearing during ring collisions
 };
 
@@ -51,6 +50,9 @@ constexpr size_t FINAL_RING_SIZE = std::clamp<size_t>(OPTIMAL_RING, 16384, 52428
 // ============================================================================
 template <uint32_t RingSize = detail::FINAL_RING_SIZE>
 class LOBState final {
+public:
+    static constexpr uint32_t RING_SIZE = RingSize;
+
 private:
     // Guarantees fast bitwise modulo operations (price & RING_MASK)
     static_assert(std::has_single_bit(RingSize), "RingSize MUST be a power of 2!");
@@ -143,11 +145,15 @@ public:
     LOBState& operator=(const LOBState&) = delete;
 
     // --- Public API ---
-    void add_order(OrderId id, Price price, Quantity qty, uint8_t side, OrderPoolAllocator& pool);
+    void add_order(OrderId id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool);
     void cancel_order(OrderId id, OrderPoolAllocator& pool);
 
     [[nodiscard]] Price get_best_bid() const noexcept;
     [[nodiscard]] Price get_best_ask() const noexcept;
+
+    void shift_window_to_center(Price target_price) noexcept;
+
+    [[nodiscard]] Price get_anchor_price() const noexcept { return anchor_price_; }
 };
 
 // ============================================================================

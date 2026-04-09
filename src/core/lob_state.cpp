@@ -7,7 +7,7 @@ namespace titan::core {
 // ============================================================================
 
 template <uint32_t RingSize>
-void LOBState<RingSize>::add_order(OrderId id, Price price, Quantity qty, uint8_t side, OrderPoolAllocator& pool) {
+void LOBState<RingSize>::add_order(OrderId id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool) {
     const Handle h = static_cast<Handle>(id & 0xFFFFFFFF);
     OrderNode& node = pool.get_node(h);
 
@@ -81,7 +81,7 @@ void LOBState<RingSize>::cancel_order(OrderId id, OrderPoolAllocator& pool) {
 
     const Price price = node.price;
     const uint8_t side = node.side;
-    const Quantity qty = node.quantity;
+    const OrderQty qty = node.quantity;
 
     // 3. Dispatch based on memory boundaries.
     if (is_hot(price)) {
@@ -383,6 +383,75 @@ void LOBState<RingSize>::shift_window(Price new_anchor) noexcept {
 
         set_active_ask(p);
         ait = cold_asks_.erase(ait);
+    }
+}
+
+template <uint32_t RingSize>
+void LOBState<RingSize>::shift_window_to_center(Price target_price) noexcept {
+    // Calculate new anchor so that target_price is perfectly centered
+    Price new_anchor = (target_price > RingSize / 2) ? (target_price - RingSize / 2) : 0;
+
+    if (new_anchor == anchor_price_)
+        return;
+
+    const Price old_anchor = anchor_price_;
+    const Price old_end = old_anchor + RingSize - 1;
+    const Price new_end = new_anchor + RingSize - 1;
+
+    // Helper to evict levels that fall out of the new intersection
+    auto evict_range = [&](Price start, Price end) {
+        for (Price p = start; p <= end; ++p) {
+            const uint32_t idx = get_index(p);
+            PriceLevel& level = hot_levels_[idx];
+            if (level.actual_price == p && level.total_qty > 0) {
+                const uint32_t l1_idx = idx >> 6;
+                const uint64_t bit_mask = 1ULL << (idx & 63);
+
+                if (l1_mask_bids_[l1_idx] & bit_mask) {
+                    cold_bids_[p] = level;
+                    set_empty_bid(p);
+                } else if (l1_mask_asks_[l1_idx] & bit_mask) {
+                    cold_asks_[p] = level;
+                    set_empty_ask(p);
+                }
+                level.total_qty = 0;
+                level.head = NULL_HANDLE;
+                level.tail = NULL_HANDLE;
+            }
+        }
+    };
+
+    // 1. Evict out-of-bounds data
+    if (new_anchor > old_anchor) {
+        evict_range(old_anchor, std::min(old_end, new_anchor - 1));
+    } else {
+        evict_range(std::max(old_anchor, new_end + 1), old_end);
+    }
+
+    anchor_price_ = new_anchor;
+
+    // Helper to absorb valid levels from the Cold Zone
+    auto absorb_range = [&](Price start, Price end, auto& cold_map, bool is_bid) {
+        auto it = cold_map.lower_bound(start);
+        while (it != cold_map.end() && it->first <= end) {
+            Price p = it->first;
+            PriceLevel& level = get_level_for_write(p);
+            level = it->second;
+            if (is_bid)
+                set_active_bid(p);
+            else
+                set_active_ask(p);
+            it = cold_map.erase(it);
+        }
+    };
+
+    // 2. Absorb newly covered data
+    if (new_anchor > old_anchor) {
+        absorb_range(std::max(new_anchor, old_end + 1), new_end, cold_bids_, true);
+        absorb_range(std::max(new_anchor, old_end + 1), new_end, cold_asks_, false);
+    } else {
+        absorb_range(new_anchor, std::min(new_end, old_anchor - 1), cold_bids_, true);
+        absorb_range(new_anchor, std::min(new_end, old_anchor - 1), cold_asks_, false);
     }
 }
 

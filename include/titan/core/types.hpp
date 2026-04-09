@@ -6,15 +6,21 @@ namespace titan::core {
 using Handle = int32_t;
 constexpr Handle NULL_HANDLE = -1;
 
+using Price = uint32_t;
+using OrderQty = int32_t;
+using OrderId = uint64_t;
+
 struct alignas(32) OrderNode {
     Handle next;
     Handle prev;
     uint32_t generation;
     int32_t owner_id;
-    float price;
-    int32_t volume;
+    Price price;
+    OrderQty quantity;
+    uint8_t side;
 
-    uint32_t _padding1;
+    uint8_t _padding1[3];
     uint32_t _padding2;
 };
-}
+
+}  // namespace titan::core
