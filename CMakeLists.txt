@@ -10,20 +10,48 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ==============================================================================
 # 1. Global C++ Standards
 # ==============================================================================
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ==============================================================================
-# 2. Compiler Flags (Cross-Platform for Windows/MSVC and Linux/GCC/Clang)
+# 2. Hardware-Aware Configuration (L3 Cache Detection)
+# ==============================================================================
+if(CMAKE_HOST_WIN32)
+    # Windows: Returns value in Megabytes
+    execute_process(COMMAND wmic cpu get L3CacheSize OUTPUT_VARIABLE WMIC_OUTPUT ERROR_QUIET)
+    string(REGEX MATCHALL "[0-9]+" L3_MB_LIST "${WMIC_OUTPUT}")
+    list(GET L3_MB_LIST 0 L3_MB)
+    if(L3_MB)
+        math(EXPR L3_BYTES "${L3_MB} * 1024 * 1024")
+    endif()
+elseif(CMAKE_HOST_UNIX)
+    # Linux: Returns value in Bytes
+    execute_process(COMMAND getconf LEVEL3_CACHE_SIZE OUTPUT_VARIABLE GETCONF_OUTPUT ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(GETCONF_OUTPUT MATCHES "^[0-9]+$")
+        set(L3_BYTES ${GETCONF_OUTPUT})
+    endif()
+endif()
+
+# Safe fallback if hardware query fails (Default: 16 MB)
+if(NOT L3_BYTES OR L3_BYTES EQUAL 0)
+    set(L3_BYTES 16777216)
+    message(WARNING "[Titan] Failed to detect L3 Cache size. Defaulting to 16 MB.")
+endif()
+
+# Expose to user for manual override if necessary
+set(TITAN_SYSTEM_L3_BYTES ${L3_BYTES} CACHE STRING "L3 Cache size in bytes for Hot Zone optimization")
+message(STATUS "[Titan] Hardware Profile -> L3 Cache: ${TITAN_SYSTEM_L3_BYTES} bytes")
+
+# ==============================================================================
+# 3. Compiler Flags (HFT Profile)
 # ==============================================================================
 if(MSVC)
-    # Windows / MSVC specific optimization flags
-    # /O2: Maximize speed, /Ot: Favor fast code, /GL: Whole program optimization, /arch:AVX2: Vectorization
+    # /O2: Max speed, /Ot: Fast code, /GL: Whole program optimization, /arch:AVX2: Vectorization
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ot /GL /arch:AVX2 /DNDEBUG")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /fsanitize=address")
 else()
-    # GCC / Clang optimization flags
+    # GCC / Clang: Native architecture tuning, Link-Time Optimization
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG -flto")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address")
 endif()
@@ -31,7 +59,7 @@ endif()
 include(FetchContent)
 
 # ==============================================================================
-# 3. Dependencies: Boost (Auto-fetch header-only mode for Windows)
+# 4. Dependencies: Boost (Header-only)
 # ==============================================================================
 FetchContent_Declare(
     boost
@@ -39,7 +67,7 @@ FetchContent_Declare(
 )
 FetchContent_GetProperties(boost)
 if(NOT boost_POPULATED)
-    message(STATUS "Fetching Boost headers from official archives...")
+    message(STATUS "[Titan] Fetching Boost headers...")
     FetchContent_Populate(boost)
 endif()
 
@@ -56,7 +84,7 @@ set_target_properties(Boost::boost PROPERTIES
 )
 
 # ==============================================================================
-# 4. Dependencies: Google Benchmark
+# 5. Dependencies: Google Benchmark
 # ==============================================================================
 FetchContent_Declare(
     googlebenchmark
@@ -65,15 +93,15 @@ FetchContent_Declare(
 )
 
 set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Disable benchmark testing" FORCE)
-
 set(HAVE_STD_REGEX TRUE CACHE BOOL "Force std::regex support" FORCE)
 set(HAVE_POSIX_REGEX FALSE CACHE BOOL "Force disable POSIX" FORCE)
 set(HAVE_GNU_POSIX_REGEX FALSE CACHE BOOL "Force disable GNU POSIX" FORCE)
 
+message(STATUS "[Titan] Fetching Google Benchmark...")
 FetchContent_MakeAvailable(googlebenchmark)
 
 # ==============================================================================
-# 5. Core Library (Titan)
+# 6. Core Library (Titan)
 # ==============================================================================
 add_library(titan_core STATIC)
 
@@ -82,15 +110,15 @@ target_include_directories(titan_core PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# Add source files
 target_sources(titan_core PRIVATE
     src/core/memory.cpp
-    # Future modules:
-    # src/core/lob_state.cpp
-    # src/core/matching_engine.cpp
+    src/core/lob_state.cpp
 )
 
+# Inject the detected L3 Cache size directly into the compiler
+target_compile_definitions(titan_core PUBLIC TITAN_SYSTEM_L3_BYTES=${TITAN_SYSTEM_L3_BYTES})
+
 # ==============================================================================
-# 6. Subdirectories
+# 7. Subdirectories
 # ==============================================================================
 add_subdirectory(benchmarks)

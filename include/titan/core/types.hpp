@@ -17,5 +17,4 @@ struct alignas(32) OrderNode {
     uint32_t _padding1;
     uint32_t _padding2;
 };
-
-}  
+}
