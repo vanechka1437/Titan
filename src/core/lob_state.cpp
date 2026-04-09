@@ -163,148 +163,170 @@ void LOBState<RingSize>::cancel_order(OrderId id, OrderPoolAllocator& pool) {
 
 template <uint32_t RingSize>
 Price LOBState<RingSize>::get_best_ask() const noexcept {
-    // ASK -> Lowest possible price. We scan FORWARD looking for the first set bit.
-
+    // ASK -> Lowest possible price. Scan FORWARD.
     const uint32_t anchor_idx = get_index(anchor_price_);
-    const uint32_t start_l1 = anchor_idx >> 6;
-    const uint32_t start_l2 = start_l1 >> 6;
+    const uint64_t max_hot_price_64 = static_cast<uint64_t>(anchor_price_) + RingSize - 1;
+    const uint32_t max_idx = get_index(static_cast<uint32_t>(max_hot_price_64));
 
-    // Helper lambda to scan a specific range of the L2/L1 bitmasks
-    auto scan_forward = [&](uint32_t l2_start, uint32_t l2_end, uint32_t base_offset) -> Price {
-        for (uint32_t i = l2_start; i <= l2_end; ++i) {
+    auto scan_forward = [&](uint32_t from_idx, uint32_t to_idx) -> Price {
+        if (from_idx > to_idx)
+            return UINT32_MAX;
+
+        const uint32_t start_l2 = from_idx >> 12;
+        const uint32_t end_l2 = to_idx >> 12;
+
+        for (uint32_t i = start_l2; i <= end_l2; ++i) {
             uint64_t mask = l2_mask_asks_[i];
 
-            // Mask out stale bits physically located before the logical start
-            if (i == start_l2 && base_offset == 0) {
-                mask &= ~((1ULL << (start_l1 & 63)) - 1);
+            // Mask out bits strictly before from_idx
+            if (i == (from_idx >> 12)) {
+                const uint32_t lower_bit = (from_idx >> 6) & 63;
+                if (lower_bit > 0)
+                    mask &= ~((1ULL << lower_bit) - 1);
+            }
+            // Mask out bits strictly after to_idx
+            if (i == (to_idx >> 12)) {
+                const uint32_t limit_bit = (to_idx >> 6) & 63;
+                if (limit_bit < 63)
+                    mask &= (1ULL << (limit_bit + 1)) - 1;
             }
 
-            if (mask == 0)
-                continue;  // Skip 4096 empty price levels in 1 CPU cycle
+            // Keep extracting bits until the L2 mask is exhausted
+            while (mask != 0) {
+                const uint32_t l1_bit = std::countr_zero(mask);
+                const uint32_t l1_idx = (i << 6) + l1_bit;
+                uint64_t final_mask = l1_mask_asks_[l1_idx];
 
-            // Found an active L1 chunk
-            const uint32_t l1_bit = std::countr_zero(mask);
-            const uint32_t l1_idx = (i << 6) + l1_bit;
+                // Precise bounds checking inside L1
+                if (l1_idx == (from_idx >> 6)) {
+                    const uint32_t lower_bit = from_idx & 63;
+                    if (lower_bit > 0)
+                        final_mask &= ~((1ULL << lower_bit) - 1);
+                }
+                if (l1_idx == (to_idx >> 6)) {
+                    const uint32_t limit_bit = to_idx & 63;
+                    if (limit_bit < 63)
+                        final_mask &= (1ULL << (limit_bit + 1)) - 1;
+                }
 
-            uint64_t final_mask = l1_mask_asks_[l1_idx];
+                if (final_mask != 0) {
+                    const uint32_t final_bit = std::countr_zero(final_mask);
+                    const uint32_t buffer_idx = (l1_idx << 6) + final_bit;
 
-            // Mask out stale bits physically located before the logical start in L1
-            if (l1_idx == start_l1 && base_offset == 0) {
-                final_mask &= ~((1ULL << (anchor_idx & 63)) - 1);
-            }
+                    if (buffer_idx >= anchor_idx) {
+                        return anchor_price_ + (buffer_idx - anchor_idx);
+                    } else {
+                        return anchor_price_ + (RingSize - anchor_idx + buffer_idx);
+                    }
+                }
 
-            if (final_mask != 0) {
-                // Found the exact active price level
-                const uint32_t final_bit = std::countr_zero(final_mask);
-                const uint32_t buffer_idx = (l1_idx << 6) + final_bit;
-                return anchor_price_ + buffer_idx - anchor_idx + base_offset;
+                // If L1 was empty due to masking, clear the bit and retry L2
+                mask &= ~(1ULL << l1_bit);
             }
         }
         return UINT32_MAX;
     };
 
-    // Phase 1: Scan from anchor to the physical end of the Ring Buffer
-    Price best = scan_forward(start_l2, L2_SIZE - 1, 0);
-    if (best != UINT32_MAX)
-        return best;
+    Price best = UINT32_MAX;
 
-    // Phase 2: Wrap around and scan from physical index 0 up to the anchor
-    if (start_l2 > 0) {
-        const uint32_t offset = RingSize - anchor_idx;
-        best = scan_forward(0, start_l2 - 1, offset);
+    if (max_idx < anchor_idx) {
+        // Physical wrap-around
+        best = scan_forward(anchor_idx, RingSize - 1);
+        if (best != UINT32_MAX)
+            return best;
+
+        best = scan_forward(0, max_idx);
+        if (best != UINT32_MAX)
+            return best;
+    } else {
+        // Continuous block
+        best = scan_forward(anchor_idx, max_idx);
         if (best != UINT32_MAX)
             return best;
     }
 
-    // Phase 3: Hot Zone is entirely empty. Query the Cold Zone Red-Black Tree.
-    // std::map is sorted ascending, so begin() is the lowest price.
     return cold_asks_.empty() ? UINT32_MAX : cold_asks_.begin()->first;
 }
 
 template <uint32_t RingSize>
 Price LOBState<RingSize>::get_best_bid() const noexcept {
-    // BID -> Highest possible price. We scan BACKWARDS looking for the highest set bit.
-
+    // BID -> Highest possible price. Scan BACKWARDS.
     const uint32_t anchor_idx = get_index(anchor_price_);
-
-    // The maximum possible logical price currently inside the Hot Zone
     const uint64_t max_hot_price_64 = static_cast<uint64_t>(anchor_price_) + RingSize - 1;
     const uint32_t max_idx = get_index(static_cast<uint32_t>(max_hot_price_64));
 
-    const uint32_t start_l1 = anchor_idx >> 6;
-    const uint32_t start_l2 = start_l1 >> 6;
+    auto scan_backward = [&](uint32_t from_idx, uint32_t to_idx) -> Price {
+        if (from_idx < to_idx)
+            return 0;
 
-    const uint32_t end_l1 = max_idx >> 6;
-    const uint32_t end_l2 = end_l1 >> 6;
+        const int32_t start_l2 = from_idx >> 12;
+        const int32_t end_l2 = to_idx >> 12;
 
-    // Helper lambda to scan backwards using std::countl_zero
-    auto scan_backward = [&](int32_t l2_start, int32_t l2_end, uint32_t max_allowed_idx) -> Price {
-        for (int32_t i = l2_start; i >= l2_end; --i) {
+        for (int32_t i = start_l2; i >= end_l2; --i) {
             uint64_t mask = l2_mask_bids_[i];
 
-            // Mask out bits that logically exceed our Hot Zone ceiling
-            if (i == static_cast<int32_t>(max_allowed_idx >> 12)) {
-                const uint32_t limit_bit = (max_allowed_idx >> 6) & 63;
-                if (limit_bit < 63) {
+            if (i == static_cast<int32_t>(from_idx >> 12)) {
+                const uint32_t limit_bit = (from_idx >> 6) & 63;
+                if (limit_bit < 63)
                     mask &= (1ULL << (limit_bit + 1)) - 1;
-                }
+            }
+            if (i == static_cast<int32_t>(to_idx >> 12)) {
+                const uint32_t lower_bit = (to_idx >> 6) & 63;
+                if (lower_bit > 0)
+                    mask &= ~((1ULL << lower_bit) - 1);
             }
 
-            if (mask == 0)
-                continue;
+            while (mask != 0) {
+                const uint32_t l1_bit = 63 - std::countl_zero(mask);
+                const uint32_t l1_idx = (i << 6) + l1_bit;
+                uint64_t final_mask = l1_mask_bids_[l1_idx];
 
-            // Find highest active bit in L2
-            const uint32_t l1_bit = 63 - std::countl_zero(mask);
-            const uint32_t l1_idx = (i << 6) + l1_bit;
-
-            uint64_t final_mask = l1_mask_bids_[l1_idx];
-
-            // Mask out bits in L1 that exceed the ceiling
-            if (l1_idx == (max_allowed_idx >> 6)) {
-                const uint32_t limit_bit = max_allowed_idx & 63;
-                if (limit_bit < 63) {
-                    final_mask &= (1ULL << (limit_bit + 1)) - 1;
+                if (l1_idx == (from_idx >> 6)) {
+                    const uint32_t limit_bit = from_idx & 63;
+                    if (limit_bit < 63)
+                        final_mask &= (1ULL << (limit_bit + 1)) - 1;
                 }
-            }
-
-            if (final_mask != 0) {
-                // Find highest active bit in L1
-                const uint32_t final_bit = 63 - std::countl_zero(final_mask);
-                const uint32_t buffer_idx = (l1_idx << 6) + final_bit;
-
-                // Un-wrap the buffer index back into an absolute price
-                if (buffer_idx >= anchor_idx) {
-                    return anchor_price_ + (buffer_idx - anchor_idx);
-                } else {
-                    return anchor_price_ + (RingSize - anchor_idx + buffer_idx);
+                if (l1_idx == (to_idx >> 6)) {
+                    const uint32_t lower_bit = to_idx & 63;
+                    if (lower_bit > 0)
+                        final_mask &= ~((1ULL << lower_bit) - 1);
                 }
+
+                if (final_mask != 0) {
+                    const uint32_t final_bit = 63 - std::countl_zero(final_mask);
+                    const uint32_t buffer_idx = (l1_idx << 6) + final_bit;
+
+                    if (buffer_idx >= anchor_idx) {
+                        return anchor_price_ + (buffer_idx - anchor_idx);
+                    } else {
+                        return anchor_price_ + (RingSize - anchor_idx + buffer_idx);
+                    }
+                }
+
+                mask &= ~(1ULL << l1_bit);
             }
         }
-        return 0;  // Not found in this segment
+        return 0;
     };
 
     Price best = 0;
 
-    // Determine if the logical window wraps around the physical array end
-    if (end_l2 < start_l2) {
-        // Phase 1: Scan from physical max_idx down to 0
-        best = scan_backward(end_l2, 0, max_idx);
+    if (max_idx < anchor_idx) {
+        // Physical wrap-around (logical highs are physically at 0..max_idx)
+        best = scan_backward(max_idx, 0);
         if (best != 0)
             return best;
 
-        // Phase 2: Wrap around and scan from the physical end down to anchor
-        best = scan_backward(L2_SIZE - 1, start_l2, RingSize - 1);
+        best = scan_backward(RingSize - 1, anchor_idx);
         if (best != 0)
             return best;
     } else {
-        // Window does not wrap around physically
-        best = scan_backward(end_l2, start_l2, max_idx);
+        // Continuous block
+        best = scan_backward(max_idx, anchor_idx);
         if (best != 0)
             return best;
     }
 
-    // Phase 3: Hot Zone empty. Query Cold Zone.
-    // std::map is sorted ascending, so rbegin() gives the highest price.
     return cold_bids_.empty() ? 0 : cold_bids_.rbegin()->first;
 }
 
