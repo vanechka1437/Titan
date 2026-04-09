@@ -228,8 +228,8 @@ Price LOBState<RingSize>::get_best_bid() const noexcept {
     const uint32_t anchor_idx = get_index(anchor_price_);
 
     // The maximum possible logical price currently inside the Hot Zone
-    const uint32_t max_hot_price = anchor_price_ + RingSize - 1;
-    const uint32_t max_idx = get_index(max_hot_price);
+    const uint64_t max_hot_price_64 = static_cast<uint64_t>(anchor_price_) + RingSize - 1;
+    const uint32_t max_idx = get_index(static_cast<uint32_t>(max_hot_price_64));
 
     const uint32_t start_l1 = anchor_idx >> 6;
     const uint32_t start_l2 = start_l1 >> 6;
