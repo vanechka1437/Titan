@@ -150,5 +150,12 @@ target_link_libraries(titan_lob_tests PRIVATE
     gtest_main
 )
 
+add_executable(titan_memory_tests
+    tests/memory_tests.cpp
+)
+
+target_link_libraries(titan_memory_tests PRIVATE titan_core gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(titan_lob_tests)
+gtest_discover_tests(titan_memory_tests)
