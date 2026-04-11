@@ -147,7 +147,7 @@ TEST_F(MemoryCoreTest, OrderPool_TheDoubleFreeNuke) {
 }
 
 // ============================================================================
-// 3. UNIFIED MEMORY ARENA TESTS
+// 3. UNIFIED MEMORY ARENA TESTS (LOB + Python Bridge)
 // ============================================================================
 
 TEST_F(MemoryCoreTest, UnifiedArena_StrictEnvironmentIsolation) {
@@ -160,25 +160,113 @@ TEST_F(MemoryCoreTest, UnifiedArena_StrictEnvironmentIsolation) {
     const uint32_t orders_per_env = 1000;
     const std::size_t linear_size = 1024;
 
-    UnifiedMemoryArena arena(num_envs, orders_per_env, linear_size);
+    const uint32_t num_agents = 10;
+    const uint32_t obs_dim = 40;
+    const uint32_t action_dim = 4;
+
+    UnifiedMemoryArena arena(num_envs, orders_per_env, linear_size, num_agents, obs_dim, action_dim);
 
     OrderPoolAllocator& pool0 = arena.get_pool(0);
     OrderPoolAllocator& pool1 = arena.get_pool(1);
 
-    // Allocate the very first handle from both pools
-    // Note: Due to LIFO stack initialization (capacity - 1 - i), the first allocated handle
-    // is actually handle index 0.
     Handle p0_h = pool0.allocate();
     Handle p1_h = pool1.allocate();
 
     OrderNode& node0 = pool0.get_node(p0_h);
     OrderNode& node1 = pool1.get_node(p1_h);
 
-    // Calculate physical memory distance in bytes
     std::ptrdiff_t byte_distance = reinterpret_cast<const char*>(&node1) - reinterpret_cast<const char*>(&node0);
-
-    // The physical distance MUST be exactly the size of one environment's block
     std::ptrdiff_t expected_distance = orders_per_env * sizeof(OrderNode);
 
     EXPECT_EQ(byte_distance, expected_distance);
+}
+
+TEST_F(MemoryCoreTest, UnifiedArena_ZeroCopyTensorsInitialization) {
+    PrintScenario(
+        "Verifying the initialization and correct flat-memory sizing of the Zero-Copy tensors for the Python bridge. "
+        "Pointers must be valid and memory must be zeroed out due to prefaulting.");
+
+    const uint32_t num_envs = 2;
+    const uint32_t num_agents = 5;
+    const uint32_t obs_dim = 10;
+    const uint32_t action_dim = 4;
+
+    UnifiedMemoryArena arena(num_envs, 100, 1024, num_agents, obs_dim, action_dim);
+
+    float* obs = arena.obs_ptr();
+    float* act = arena.action_ptr();
+    int8_t* mask = arena.mask_ptr();
+
+    EXPECT_NE(obs, nullptr);
+    EXPECT_NE(act, nullptr);
+    EXPECT_NE(mask, nullptr);
+
+    std::size_t last_obs_idx = (num_envs * num_agents * obs_dim) - 1;
+    std::size_t last_mask_idx = (num_envs * num_agents) - 1;
+
+    EXPECT_EQ(obs[last_obs_idx], 0.0f);
+    EXPECT_EQ(mask[last_mask_idx], 0);
+}
+
+TEST_F(MemoryCoreTest, UnifiedArena_GlobalResetFlushesState) {
+    PrintScenario(
+        "Testing the RL Episode Reset mechanism. A global reset MUST instantaneously zero out all Python "
+        "observation/action "
+        "tensors, reset the ready masks, and restore ALL order pools to their maximum capacity without reallocating "
+        "memory.");
+
+    const uint32_t num_envs = 2;
+    const uint32_t orders_per_env = 50;
+    const uint32_t num_agents = 2;
+    const uint32_t obs_dim = 10;
+
+    UnifiedMemoryArena arena(num_envs, orders_per_env, 1024, num_agents, obs_dim, 4);
+
+    arena.get_pool(0).allocate();
+    arena.get_pool(0).allocate();
+    arena.get_pool(0).allocate();
+    EXPECT_EQ(arena.get_pool(0).size(), orders_per_env - 3);
+
+    arena.obs_ptr()[0] = 42.5f;
+    arena.obs_ptr()[15] = -10.0f;
+    arena.action_ptr()[3] = 1.0f;
+    arena.mask_ptr()[1] = 1;
+
+    arena.reset();
+
+    EXPECT_EQ(arena.get_pool(0).size(), orders_per_env);
+
+    EXPECT_EQ(arena.obs_ptr()[0], 0.0f);
+    EXPECT_EQ(arena.obs_ptr()[15], 0.0f);
+    EXPECT_EQ(arena.action_ptr()[3], 0.0f);
+    EXPECT_EQ(arena.mask_ptr()[1], 0);
+
+    Handle h = arena.get_pool(0).allocate();
+    EXPECT_NE(h, NULL_HANDLE);
+}
+
+TEST_F(MemoryCoreTest, OrderPool_ResetRestoresDeterministicAllocation) {
+    PrintScenario(
+        "Verifying that OrderPoolAllocator::reset() restores the LIFO free list in the EXACT same order. "
+        "This is critical for cross-episode determinism. The exact same sequence of allocations in Episode 2 "
+        "must yield the exact same handles as in Episode 1.");
+
+    std::vector<OrderNode> nodes(5);
+    std::vector<Handle> free_list(5);
+    OrderPoolAllocator pool;
+    pool.init(nodes.data(), free_list.data(), 5);
+
+    Handle e1_h1 = pool.allocate();
+    Handle e1_h2 = pool.allocate();
+
+    pool.reset();
+
+    Handle e2_h1 = pool.allocate();
+    Handle e2_h2 = pool.allocate();
+
+    EXPECT_EQ(e1_h1, e2_h1);
+    EXPECT_EQ(e1_h2, e2_h2);
+
+    EXPECT_EQ(pool.get_node(e2_h1).next, NULL_HANDLE);
+    EXPECT_EQ(pool.get_node(e2_h1).prev, NULL_HANDLE);
 }
