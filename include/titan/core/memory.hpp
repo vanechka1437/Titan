@@ -1,7 +1,10 @@
 #pragma once
 
+#if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#endif
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -58,6 +61,8 @@ public:
 
     void init(OrderNode* nodes, Handle* free_list, uint32_t capacity) noexcept;
 
+    void reset() noexcept;
+
     [[nodiscard]] inline Handle allocate() noexcept {
         if (head_ == 0) [[unlikely]] {
             return NULL_HANDLE;
@@ -91,28 +96,72 @@ public:
 // UnifiedMemoryArena
 // Master owner of all simulation memory allocations.
 // ========================================================================
+// ========================================================================
+// UnifiedMemoryArena
+// Master owner of all simulation memory allocations.
+// Combines LOB Memory Pools and Zero-Copy Python/C++ Shared Tensors.
+// ========================================================================
 class UnifiedMemoryArena {
 private:
+    // Config
     uint32_t num_envs_;
     uint32_t max_orders_per_env_;
+    uint32_t num_agents_;
+    uint32_t obs_dim_;
+    uint32_t action_dim_;
 
+    // LOB Memory
     std::vector<OrderNode> raw_nodes_;
     std::vector<Handle> raw_free_lists_;
     std::vector<OrderPoolAllocator> pools_;
-
     LinearAllocator linear_allocator_;
 
+    // Python/C++ Bridge Memory (Zero-Copy Tensors)
+    std::vector<float> observation_tensor_;
+    std::vector<float> action_tensor_;
+    std::vector<int8_t> ready_mask_;
+
+    // Spinlock for execution control
+    // 0 = C++ holds execution, 1 = Python holds execution
+    alignas(64) std::atomic<int> state_{0};
+
 public:
-    UnifiedMemoryArena(uint32_t num_envs, uint32_t max_orders_per_env, std::size_t linear_bytes);
+    UnifiedMemoryArena(uint32_t num_envs, uint32_t max_orders_per_env, std::size_t linear_bytes, uint32_t num_agents,
+                       uint32_t obs_dim, uint32_t action_dim);
 
     UnifiedMemoryArena(const UnifiedMemoryArena&) = delete;
     UnifiedMemoryArena& operator=(const UnifiedMemoryArena&) = delete;
 
+    // --- LOB Interfaces ---
     [[nodiscard]] inline OrderPoolAllocator& get_pool(uint32_t env_id) noexcept { return pools_[env_id]; }
     [[nodiscard]] inline LinearAllocator& get_linear_allocator() noexcept { return linear_allocator_; }
 
     [[nodiscard]] inline uint32_t num_envs() const noexcept { return num_envs_; }
     [[nodiscard]] inline uint32_t max_orders() const noexcept { return max_orders_per_env_; }
+
+    // --- Bridge Interfaces (Python <-> C++) ---
+    [[nodiscard]] inline uint32_t num_agents() const noexcept { return num_agents_; }
+    [[nodiscard]] inline uint32_t obs_dim() const noexcept { return obs_dim_; }
+    [[nodiscard]] inline uint32_t action_dim() const noexcept { return action_dim_; }
+
+    [[nodiscard]] inline float* obs_ptr() noexcept { return observation_tensor_.data(); }
+    [[nodiscard]] inline float* action_ptr() noexcept { return action_tensor_.data(); }
+    [[nodiscard]] inline int8_t* mask_ptr() noexcept { return ready_mask_.data(); }
+
+    // --- Synchronization ---
+    inline void release_to_python() noexcept { state_.store(1, std::memory_order_release); }
+
+    inline void wait_for_python() noexcept {
+        while (state_.load(std::memory_order_acquire) != 0) {
+#if defined(__x86_64__) || defined(_M_X64)
+            _mm_pause();  // Prevent pipeline flushes and save L1 cache
+#endif
+        }
+    }
+
+    inline void release_to_cpp() noexcept { state_.store(0, std::memory_order_release); }
+
+    void reset() noexcept;
 };
 
 }  // namespace titan::core
