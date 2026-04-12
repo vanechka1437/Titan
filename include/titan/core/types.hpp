@@ -14,13 +14,13 @@ struct alignas(32) OrderNode {
     Handle next;
     Handle prev;
     uint32_t generation;
+    uint32_t id;
     int32_t owner_id;
     Price price;
     OrderQty quantity;
     uint8_t side;
 
     uint8_t _padding1[3];
-    uint32_t _padding2;
 };
 
 }  // namespace titan::core

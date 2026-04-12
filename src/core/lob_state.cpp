@@ -7,11 +7,19 @@ namespace titan::core {
 // ============================================================================
 
 template <uint32_t RingSize>
-void LOBState<RingSize>::add_order(OrderId id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool) {
-    const Handle h = static_cast<Handle>(id & 0xFFFFFFFF);
+Handle LOBState<RingSize>::add_order(OrderId id, uint16_t owner_id, Price price, OrderQty qty, uint8_t side,
+                                     OrderPoolAllocator& pool) {
+    // 1. Secure O(1) allocation from the LIFO free list (preserves ABA protection tags)
+    const Handle h = pool.allocate();
+    if (h == NULL_HANDLE) [[unlikely]] {
+        return NULL_HANDLE;  // Pool capacity exhausted
+    }
+
     OrderNode& node = pool.get_node(h);
 
-    // Initialize the payload. Next pointer must be strictly nullified as it's a tail insertion.
+    // 2. Initialize the payload. Next pointer must be strictly nullified as it's a tail insertion.
+    node.id = id;
+    node.owner_id = owner_id;
     node.price = price;
     node.quantity = qty;
     node.side = side;
@@ -62,28 +70,24 @@ void LOBState<RingSize>::add_order(OrderId id, Price price, OrderQty qty, uint8_
 
         level.total_qty += qty;
     }
+
+    // Return the memory handle back to the MatchingEngine for O(1) mapping
+    return h;
 }
 
 template <uint32_t RingSize>
-void LOBState<RingSize>::cancel_order(OrderId id, OrderPoolAllocator& pool) {
-    // 1. Unpack the 64-bit ID into its physical handle and generation tag.
-    const Handle h = static_cast<Handle>(id & 0xFFFFFFFF);
-    const uint32_t expected_gen = static_cast<uint32_t>(id >> 32);
-
-    OrderNode& node = pool.get_node(h);
-
-    // 2. ABA Problem / Stale Execution Protection.
-    // If the generation doesn't match, this order was already completely filled
-    // or cancelled, and the memory handle has been reused by a new order.
-    if (node.generation != expected_gen) {
+void LOBState<RingSize>::remove_order(Handle h, OrderPoolAllocator& pool) noexcept {
+    if (h == NULL_HANDLE) [[unlikely]] {
         return;
     }
+
+    OrderNode& node = pool.get_node(h);
 
     const Price price = node.price;
     const uint8_t side = node.side;
     const OrderQty qty = node.quantity;
 
-    // 3. Dispatch based on memory boundaries.
+    // Dispatch based on memory boundaries.
     if (is_hot(price)) {
         // --- HOT ZONE: O(1) Cache-resident removal ---
 
@@ -92,8 +96,9 @@ void LOBState<RingSize>::cancel_order(OrderId id, OrderPoolAllocator& pool) {
         PriceLevel& level = hot_levels_[get_index(price)];
 
         // Safety check against lazy clearing overlaps
-        if (level.actual_price != price)
+        if (level.actual_price != price) {
             return;
+        }
 
         // O(1) Intrusive doubly-linked list unlinking
         if (node.prev != NULL_HANDLE) {
@@ -114,10 +119,11 @@ void LOBState<RingSize>::cancel_order(OrderId id, OrderPoolAllocator& pool) {
         // Hardware Acceleration: Extinguish the bitmask if the price level is now dead.
         // This ensures get_best_bid() / get_best_ask() won't stop at an empty level.
         if (level.total_qty == 0) {
-            if (side == 0)
+            if (side == 0) {
                 set_empty_bid(price);  // Assuming 0 = BID
-            else
+            } else {
                 set_empty_ask(price);  // Assuming 1 = ASK
+            }
         }
 
     } else {
@@ -156,7 +162,6 @@ void LOBState<RingSize>::cancel_order(OrderId id, OrderPoolAllocator& pool) {
     // Freeing memory is the strict responsibility of the MatchingEngine,
     // which allows the engine to emit cancel execution reports before the memory dies.
 }
-
 // ============================================================================
 // HARDWARE ACCELERATED SEARCH (O(1))
 // ============================================================================
@@ -477,6 +482,40 @@ void LOBState<RingSize>::shift_window_to_center(Price target_price) noexcept {
     }
 }
 
+template <uint32_t RingSize>
+Handle LOBState<RingSize>::get_first_order(uint8_t side, Price price) const noexcept {
+    if (is_hot(price)) {
+        const PriceLevel& level = hot_levels_[get_index(price)];
+        if (level.actual_price == price) {
+            return level.head;
+        }
+    } else {
+        const auto& target_map = (side == 0) ? cold_bids_ : cold_asks_;
+        auto it = target_map.find(price);
+        if (it != target_map.end()) {
+            return it->second.head;
+        }
+    }
+    return NULL_HANDLE;
+}
+
+template <uint32_t RingSize>
+void LOBState<RingSize>::reset() noexcept {
+    // 1. Zero out hardware bitmasks (instantly clears the Hot Zone logic)
+    std::fill(std::begin(l1_mask_bids_), std::end(l1_mask_bids_), 0);
+    std::fill(std::begin(l2_mask_bids_), std::end(l2_mask_bids_), 0);
+    std::fill(std::begin(l1_mask_asks_), std::end(l1_mask_asks_), 0);
+    std::fill(std::begin(l2_mask_asks_), std::end(l2_mask_asks_), 0);
+
+    // 2. We don't need to loop over hot_levels_ because actual_price lazy clearing
+    // will naturally overwrite old data when new prices arrive.
+    // However, if we want strict determinism across RL episodes, we can force reset the anchor.
+    anchor_price_ = 0;
+
+    // 3. Clear the Cold Zone maps
+    cold_bids_.clear();
+    cold_asks_.clear();
+}
 // ============================================================================
 // EXPLICIT TEMPLATE INSTANTIATION
 // ============================================================================

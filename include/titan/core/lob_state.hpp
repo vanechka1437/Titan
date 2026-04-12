@@ -145,8 +145,15 @@ public:
     LOBState& operator=(const LOBState&) = delete;
 
     // --- Public API ---
-    void add_order(OrderId id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool);
-    void cancel_order(OrderId id, OrderPoolAllocator& pool);
+
+    // Core insertion. Returns the Handle for O(1) mapping in the MatchingEngine.
+    Handle add_order(OrderId id, uint16_t owner_id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool);
+
+    // O(1) extraction of an order using its memory handle.
+    void remove_order(Handle h, OrderPoolAllocator& pool) noexcept;
+
+    // Fast retrieval of the first order at a specific price level (for spread crossing).
+    [[nodiscard]] Handle get_first_order(uint8_t side, Price price) const noexcept;
 
     [[nodiscard]] Price get_best_bid() const noexcept;
     [[nodiscard]] Price get_best_ask() const noexcept;
@@ -154,6 +161,9 @@ public:
     void shift_window_to_center(Price target_price) noexcept;
 
     [[nodiscard]] Price get_anchor_price() const noexcept { return anchor_price_; }
+
+    // Instant reset for RL episodes
+    void reset() noexcept;
 };
 
 // ============================================================================
