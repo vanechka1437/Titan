@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <boost/container/flat_map.hpp>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "titan/core/types.hpp"
@@ -11,71 +13,82 @@ namespace titan::core {
 // ============================================================================
 // 1. SHADOW LOB
 // Local, delayed copy of the reality for each individual agent.
+// Uses Boost Flat Map for optimal L1/L2 cache locality and O(log N) lookups,
+// gracefully scaling to 10,000+ levels without pointer-chasing overhead.
 // ============================================================================
 class ShadowLOB {
 private:
-    // Flat arrays for L1 cache locality. In HFT, memmove (std::vector::insert)
-    // on small arrays (up to 100-200 elements) is orders of magnitude faster
-    // than red-black trees (std::map) due to the absence of cache misses.
-    struct Level {
-        Price price;
-        OrderQty qty;
-    };
+    // Bids are automatically sorted in DESCENDING order (highest price first)
+    boost::container::flat_map<Price, OrderQty, std::greater<Price>> bids_;
 
-    std::vector<Level> bids_;
-    std::vector<Level> asks_;
+    // Asks are automatically sorted in ASCENDING order (lowest price first)
+    boost::container::flat_map<Price, OrderQty, std::less<Price>> asks_;
 
 public:
     explicit ShadowLOB(std::size_t reserve_capacity = 1024) {
+        // Pre-allocating contiguous memory blocks to prevent reallocations
         bids_.reserve(reserve_capacity);
         asks_.reserve(reserve_capacity);
     }
 
     // Apply a delta (Market Data Event) to the shadow LOB
     inline void apply_delta(uint8_t side, Price price, int32_t qty_delta) noexcept {
-        auto& book = (side == 0) ? bids_ : asks_;
-
-        // Bids are sorted in descending order, Asks in ascending order
-        auto cmp = [side](const Level& a, const Level& b) {
-            return (side == 0) ? a.price > b.price : a.price < b.price;
-        };
-
-        auto it = std::lower_bound(book.begin(), book.end(), Level{price, 0}, cmp);
-
-        if (it != book.end() && it->price == price) {
-            // Level exists, update the quantity
-            int32_t new_qty = static_cast<int32_t>(it->qty) + qty_delta;
-            if (new_qty <= 0) {
-                book.erase(it);  // Erase the level if liquidity is depleted
-            } else {
-                it->qty = static_cast<OrderQty>(new_qty);
+        if (side == 0) {  // --- BID ---
+            auto it = bids_.find(price);
+            if (it != bids_.end()) {
+                // Level exists, update the quantity
+                int32_t new_qty = static_cast<int32_t>(it->second) + qty_delta;
+                if (new_qty <= 0) {
+                    bids_.erase(it);  // Erase the level if liquidity is depleted
+                } else {
+                    it->second = static_cast<OrderQty>(new_qty);
+                }
+            } else if (qty_delta > 0) {
+                // New price level: emplace handles the sorted insertion automatically
+                bids_.emplace(price, static_cast<OrderQty>(qty_delta));
             }
-        } else if (qty_delta > 0) {
-            // New price level
-            book.insert(it, Level{price, static_cast<OrderQty>(qty_delta)});
+        } else {  // --- ASK ---
+            auto it = asks_.find(price);
+            if (it != asks_.end()) {
+                int32_t new_qty = static_cast<int32_t>(it->second) + qty_delta;
+                if (new_qty <= 0) {
+                    asks_.erase(it);
+                } else {
+                    it->second = static_cast<OrderQty>(new_qty);
+                }
+            } else if (qty_delta > 0) {
+                asks_.emplace(price, static_cast<OrderQty>(qty_delta));
+            }
         }
     }
 
-    // Instant Zero-Copy export of top-N levels directly to the PyTorch tensor
+    // Instant Zero-Copy export of top-N levels directly to the PyTorch tensor.
+    // Safe 'depth' parameter protects RL networks from the curse of dimensionality,
+    // while the flat_map safely holds the full macroscopic state of the market.
     inline void export_to_tensor(float* obs_ptr, uint32_t depth) const noexcept {
         uint32_t offset = 0;
 
         // Write Bids (Price, Quantity)
+        auto bid_it = bids_.begin();
         for (uint32_t i = 0; i < depth; ++i) {
-            if (i < bids_.size()) {
-                obs_ptr[offset++] = static_cast<float>(bids_[i].price);
-                obs_ptr[offset++] = static_cast<float>(bids_[i].qty);
+            if (bid_it != bids_.end()) {
+                obs_ptr[offset++] = static_cast<float>(bid_it->first);   // Price
+                obs_ptr[offset++] = static_cast<float>(bid_it->second);  // Quantity
+                ++bid_it;
             } else {
+                // Pad with zeros if the book depth is shallower than requested
                 obs_ptr[offset++] = 0.0f;
                 obs_ptr[offset++] = 0.0f;
             }
         }
 
         // Write Asks (Price, Quantity)
+        auto ask_it = asks_.begin();
         for (uint32_t i = 0; i < depth; ++i) {
-            if (i < asks_.size()) {
-                obs_ptr[offset++] = static_cast<float>(asks_[i].price);
-                obs_ptr[offset++] = static_cast<float>(asks_[i].qty);
+            if (ask_it != asks_.end()) {
+                obs_ptr[offset++] = static_cast<float>(ask_it->first);   // Price
+                obs_ptr[offset++] = static_cast<float>(ask_it->second);  // Quantity
+                ++ask_it;
             } else {
                 obs_ptr[offset++] = 0.0f;
                 obs_ptr[offset++] = 0.0f;
@@ -83,6 +96,7 @@ public:
         }
     }
 
+    // Fast reset between simulation episodes
     inline void clear() noexcept {
         bids_.clear();
         asks_.clear();
