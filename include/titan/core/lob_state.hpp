@@ -24,7 +24,7 @@ using OrderId = uint64_t;
 struct alignas(16) PriceLevel {
     Handle head{NULL_HANDLE};
     Handle tail{NULL_HANDLE};
-    uint64_t total_qty{0};
+    int64_t total_qty{0};
     Price actual_price{0};  // Tag for O(1) lazy clearing during ring collisions
 };
 
