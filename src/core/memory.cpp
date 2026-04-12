@@ -28,7 +28,6 @@ void OrderPoolAllocator::init(OrderNode* nodes, Handle* free_list, uint32_t capa
     for (uint32_t i = 0; i < capacity; ++i) {
         free_list_[i] = static_cast<Handle>(capacity - 1 - i);
 
-        nodes_[i].generation = 0;
         nodes_[i].next = NULL_HANDLE;
         nodes_[i].prev = NULL_HANDLE;
 
