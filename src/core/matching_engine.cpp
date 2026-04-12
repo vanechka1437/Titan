@@ -30,42 +30,63 @@ void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8
 // ============================================================================
 void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t side, Price price, OrderQty qty,
                                    EventBuffer& out_events) noexcept {
+    // 1. SEGFAULT PROTECTION
+    // Ensure the Python-generated order_id does not exceed our allocated vector capacity.
+    if (order_id >= order_map_.size()) [[unlikely]] {
+        return;
+    }
+
     OrderQty remaining_qty = qty;
 
     if (side == 0) {  // --- INCOMING BID (Aggressive Buy) ---
         while (remaining_qty > 0) {
             Price best_ask = lob_.get_best_ask();
 
-            // If the spread doesn't cross (best ask is higher than our price), exit the matching loop
+            // Spread check: If best ask is strictly greater than our buy limit, matching stops.
+            // For Market Orders (price = UINT32_MAX), this condition is theoretically never met
+            // until the book is completely empty (best_ask = UINT32_MAX).
             if (best_ask > price) {
                 break;
             }
 
-            // Get the first order (head of the queue) at the best ask price
+            // Retrieve the head of the FIFO queue at the best ask price
             Handle maker_handle = lob_.get_first_order(1, best_ask);
             if (maker_handle == NULL_HANDLE) {
-                break;  // Protection against phantom bits/desync
+                break;  // Failsafe against phantom bits or state desync
             }
 
             OrderNode& maker = pool_.get_node(maker_handle);
+
+            // 2. SELF-TRADE PREVENTION (STP) - Cancel Resting Policy
+            // If the aggressive order matches against a passive order from the same agent,
+            // we cancel the passive maker order to prevent artificial volume generation (wash trading).
+            if (maker.owner_id == owner_id) [[unlikely]] {
+                out_events.push_update(maker.side, maker.price, -(static_cast<int32_t>(maker.quantity)));
+                order_map_[maker.id] = NULL_HANDLE;
+                lob_.remove_order(maker_handle, pool_);
+                pool_.free(maker_handle);
+                continue;  // Skip execution and proceed to the next resting order
+            }
+
             OrderQty trade_qty = std::min(remaining_qty, maker.quantity);
 
-            // Execute the trade
+            // Execute the cross trade
             execute_trade(maker_handle, owner_id, side, trade_qty, out_events);
             remaining_qty -= trade_qty;
 
-            // If the passive order is fully filled, completely remove it from the LOB
+            // If the passive maker order is completely depleted, remove it permanently
             if (maker.quantity == 0) {
-                order_map_[maker.id] = NULL_HANDLE;      // 1. Remove from the O(1) mapping
-                lob_.remove_order(maker_handle, pool_);  // 2. Unlink from the intrusive list
-                pool_.free(maker_handle);                // 3. IMPORTANT: Return the handle back to the free pool
+                order_map_[maker.id] = NULL_HANDLE;
+                lob_.remove_order(maker_handle, pool_);
+                pool_.free(maker_handle);
             }
         }
     } else {  // --- INCOMING ASK (Aggressive Sell) ---
         while (remaining_qty > 0) {
             Price best_bid = lob_.get_best_bid();
 
-            // If the spread doesn't cross (best bid is lower than our price), exit
+            // Spread check: If best bid is strictly less than our sell limit, matching stops.
+            // For Market Orders (price = 0), this condition is never met until the book is empty.
             if (best_bid < price) {
                 break;
             }
@@ -76,6 +97,16 @@ void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t
             }
 
             OrderNode& maker = pool_.get_node(maker_handle);
+
+            // 2. SELF-TRADE PREVENTION (STP) - Cancel Resting Policy
+            if (maker.owner_id == owner_id) [[unlikely]] {
+                out_events.push_update(maker.side, maker.price, -(static_cast<int32_t>(maker.quantity)));
+                order_map_[maker.id] = NULL_HANDLE;
+                lob_.remove_order(maker_handle, pool_);
+                pool_.free(maker_handle);
+                continue;
+            }
+
             OrderQty trade_qty = std::min(remaining_qty, maker.quantity);
 
             execute_trade(maker_handle, owner_id, side, trade_qty, out_events);
@@ -84,20 +115,22 @@ void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t
             if (maker.quantity == 0) {
                 order_map_[maker.id] = NULL_HANDLE;
                 lob_.remove_order(maker_handle, pool_);
-                pool_.free(maker_handle);  // RETURN MEMORY TO POOL
+                pool_.free(maker_handle);
             }
         }
     }
 
-    // If remaining volume exists after aggressive matching (or no spread crossed at all),
-    // place the remainder into the order book as a new passive Limit Order.
-    if (remaining_qty > 0) {
+    // 3. PASSIVE ORDER ROUTING & MARKET ORDER SENTINEL PROTECTION
+    // If volume remains (e.g., partial fill or no crossing spread), we insert it as a resting Limit Order.
+    // Sentinel values (price == 0 for Market Sells, price == UINT32_MAX for Market Buys) are strictly
+    // prohibited from entering the book. Their unfilled remainder simply evaporates (FOK/IOC behavior).
+    if (remaining_qty > 0 && price != 0 && price != UINT32_MAX) {
         Handle new_handle = lob_.add_order(order_id, owner_id, price, remaining_qty, side, pool_);
 
         if (new_handle != NULL_HANDLE) [[likely]] {
-            order_map_[order_id] = new_handle;  // Store the Handle for O(1) cancellation
+            order_map_[order_id] = new_handle;  // Register handle for O(1) cancellation routing
 
-            // Broadcast to the world that new liquidity appeared in the LOB
+            // Broadcast the liquidity addition to the external world
             out_events.push_update(side, price, remaining_qty);
         }
     }
