@@ -55,7 +55,7 @@ struct EventBuffer {
                            side,
                            owner_id,
                            price,
-                           -(static_cast<int32_t>(qty)),
+                           (side == 0) ? static_cast<int32_t>(qty) : -(static_cast<int32_t>(qty)),
                            (side == 0) ? -(static_cast<int64_t>(price) * qty) : (static_cast<int64_t>(price) * qty)};
     }
 };

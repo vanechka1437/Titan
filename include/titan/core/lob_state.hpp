@@ -24,7 +24,7 @@ using OrderId = uint64_t;
 struct alignas(16) PriceLevel {
     Handle head{NULL_HANDLE};
     Handle tail{NULL_HANDLE};
-    OrderQty total_qty{0};
+    uint64_t total_qty{0};
     Price actual_price{0};  // Tag for O(1) lazy clearing during ring collisions
 };
 
@@ -161,6 +161,8 @@ public:
     void shift_window_to_center(Price target_price) noexcept;
 
     [[nodiscard]] Price get_anchor_price() const noexcept { return anchor_price_; }
+
+    inline void reduce_level_qty(uint8_t side, Price price, OrderQty trade_qty) noexcept;
 
     // Instant reset for RL episodes
     void reset() noexcept;

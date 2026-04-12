@@ -76,6 +76,41 @@ Handle LOBState<RingSize>::add_order(OrderId id, uint16_t owner_id, Price price,
 }
 
 template <uint32_t RingSize>
+inline void LOBState<RingSize>::reduce_level_qty(uint8_t side, Price price, OrderQty trade_qty) noexcept {
+    if (is_hot(price)) {
+        // --- HOT ZONE ---
+        PriceLevel& level = hot_levels_[get_index(price)];
+
+        if (level.actual_price != price) {
+            return;
+        }
+
+        level.total_qty -= trade_qty;
+
+        if (level.total_qty <= 0) {
+            level.total_qty = 0;
+            if (side == 0) {
+                set_empty_bid(price);
+            } else {
+                set_empty_ask(price);
+            }
+        }
+    } else {
+        // --- COLD ZONE ---
+        auto& target_map = (side == 0) ? cold_bids_ : cold_asks_;
+        auto it = target_map.find(price);
+
+        if (it != target_map.end()) {
+            it->second.total_qty -= trade_qty;
+
+            if (it->second.total_qty <= 0) {
+                it->second.total_qty = 0;
+            }
+        }
+    }
+}
+
+template <uint32_t RingSize>
 void LOBState<RingSize>::remove_order(Handle h, OrderPoolAllocator& pool) noexcept {
     if (h == NULL_HANDLE) [[unlikely]] {
         return;
@@ -385,6 +420,8 @@ void LOBState<RingSize>::shift_window(Price new_anchor) noexcept {
             level.head = NULL_HANDLE;
             level.tail = NULL_HANDLE;
         }
+        if (p == drop_end)
+            break;
     }
 
     // 2. Absorb prices from Cold Zone that now fit into the new Hot Zone window
@@ -415,7 +452,7 @@ void LOBState<RingSize>::shift_window(Price new_anchor) noexcept {
 
 template <uint32_t RingSize>
 void LOBState<RingSize>::shift_window_to_center(Price target_price) noexcept {
-    // Calculate new anchor so that target_price is perfectly centered
+    // Calculate new anchor so that target_price is perfectly centered within the Ring Buffer
     Price new_anchor = (target_price > RingSize / 2) ? (target_price - RingSize / 2) : 0;
 
     if (new_anchor == anchor_price_)
@@ -425,15 +462,18 @@ void LOBState<RingSize>::shift_window_to_center(Price target_price) noexcept {
     const Price old_end = old_anchor + RingSize - 1;
     const Price new_end = new_anchor + RingSize - 1;
 
-    // Helper to evict levels that fall out of the new intersection
+    // Helper to evict levels that fall out of the newly calculated intersection
     auto evict_range = [&](Price start, Price end) {
-        for (Price p = start; p <= end; ++p) {
+        for (Price p = start;; ++p) {
             const uint32_t idx = get_index(p);
             PriceLevel& level = hot_levels_[idx];
+
+            // Lazy Clear verification: Only evict if the level actually belongs to this price
             if (level.actual_price == p && level.total_qty > 0) {
                 const uint32_t l1_idx = idx >> 6;
                 const uint64_t bit_mask = 1ULL << (idx & 63);
 
+                // ZERO-MEMORY-ACCESS CHECK: Query hardware masks to determine order side
                 if (l1_mask_bids_[l1_idx] & bit_mask) {
                     cold_bids_[p] = level;
                     set_empty_bid(p);
@@ -441,38 +481,59 @@ void LOBState<RingSize>::shift_window_to_center(Price target_price) noexcept {
                     cold_asks_[p] = level;
                     set_empty_ask(p);
                 }
+
+                // Purge the level data
                 level.total_qty = 0;
                 level.head = NULL_HANDLE;
                 level.tail = NULL_HANDLE;
             }
+
+            // Break condition placed at the end to process the boundary inclusively
+            // while completely preventing uint32_t overflow on ++p
+            if (p == end)
+                break;
         }
     };
 
-    // 1. Evict out-of-bounds data
+    // 1. Evict out-of-bounds data based on the direction of the market shift
     if (new_anchor > old_anchor) {
         evict_range(old_anchor, std::min(old_end, new_anchor - 1));
     } else {
         evict_range(std::max(old_anchor, new_end + 1), old_end);
     }
 
+    // Commit the new anchor offset
     anchor_price_ = new_anchor;
 
-    // Helper to absorb valid levels from the Cold Zone
+    // Helper to safely absorb valid levels from the Cold Zone (Boost Flat Map)
     auto absorb_range = [&](Price start, Price end, auto& cold_map, bool is_bid) {
-        auto it = cold_map.lower_bound(start);
-        while (it != cold_map.end() && it->first <= end) {
-            Price p = it->first;
+        auto first = cold_map.lower_bound(start);
+        auto last = first;
+
+        // Phase 1: Transfer memory representations to the Hot Zone and ignite bitmasks
+        while (last != cold_map.end() && last->first <= end) {
+            Price p = last->first;
             PriceLevel& level = get_level_for_write(p);
-            level = it->second;
+            level = last->second;
+
             if (is_bid)
                 set_active_bid(p);
             else
                 set_active_ask(p);
-            it = cold_map.erase(it);
+
+            ++last;  // Advance iterator without erasing to prevent quadratic shifting
+        }
+
+        // Phase 2: CRITICAL O(N) ERASE
+        // boost::container::flat_map uses a contiguous array. Erasing elements one-by-one
+        // inside the loop causes catastrophic O(N^2) memory shifting overhead.
+        // Range erase guarantees a single, highly-optimized block shift.
+        if (first != last) {
+            cold_map.erase(first, last);
         }
     };
 
-    // 2. Absorb newly covered data
+    // 2. Absorb newly covered data from the fallback trees
     if (new_anchor > old_anchor) {
         absorb_range(std::max(new_anchor, old_end + 1), new_end, cold_bids_, true);
         absorb_range(std::max(new_anchor, old_end + 1), new_end, cold_asks_, false);

@@ -11,6 +11,8 @@ void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8
                                    DefaultEventBuffer& out_events) {
     OrderNode& maker = pool_.get_node(maker_handle);
 
+    lob_.reduce_level_qty(maker.side, maker.price, trade_qty);
+
     // 1. Decrease the volume of the limit order (Maker)
     maker.quantity -= trade_qty;
 
@@ -30,6 +32,8 @@ void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8
 // ============================================================================
 void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t side, Price price, OrderQty qty,
                                    DefaultEventBuffer& out_events) {
+    if (order_map_[order_id] != NULL_HANDLE)
+        return;  // Reject duplicate order IDs that are already active in the book.
     // 1. SEGFAULT PROTECTION
     // Ensure the Python-generated order_id does not exceed our allocated vector capacity.
     if (order_id >= order_map_.size()) [[unlikely]] {

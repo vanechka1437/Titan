@@ -6,6 +6,7 @@
 #include <functional>
 #include <vector>
 
+#include "titan/core/matching_engine.hpp"
 #include "titan/core/types.hpp"
 
 namespace titan::core {
@@ -157,17 +158,26 @@ class EnvironmentState {
 public:
     uint32_t env_id;
 
-    // Each environment has its own independent nanosecond clock
+    // Each environment possesses its own independent nanosecond clock
+    // critical for precise causality tracking across RL episodes.
     uint64_t current_time{0};
 
-    // Array of agents living within this specific environment instance
+    // Array of agents residing within this specific environment instance.
     std::vector<AgentState> agents;
 
-    // A pointer to the MatchingEngine for this environment will be added here
-    // MatchingEngine* engine = nullptr;
+    // The centralized event buffer for this environment.
+    // Allocated safely on the Heap (as part of the parent container),
+    // guaranteeing zero dynamic allocations during the hot loop while
+    // completely preventing Stack Overflow exceptions.
+    DefaultEventBuffer event_buffer;
 
+    // Pointer to the localized Matching Engine governing this environment.
+    MatchingEngine* engine = nullptr;
+
+    // Instantly resets the environment physics and agents to epoch 0
     inline void reset() noexcept {
         current_time = 0;
+        event_buffer.clear();
         for (auto& agent : agents) {
             agent.reset();
         }

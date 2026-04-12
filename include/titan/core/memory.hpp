@@ -5,6 +5,7 @@
 #endif
 
 #include <atomic>
+#include <boost/align/aligned_allocator.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -81,7 +82,6 @@ public:
         // Helps if we need to access this node's generation immediately after.
         _mm_prefetch(reinterpret_cast<const char*>(&nodes_[handle]), _MM_HINT_T0);
 
-        nodes_[handle].generation++;
         free_list_[head_++] = handle;
     }
 
@@ -107,7 +107,7 @@ private:
     uint32_t action_dim_;
 
     // LOB Memory
-    std::vector<OrderNode> raw_nodes_;
+    std::vector<OrderNode, boost::alignment::aligned_allocator<OrderNode, 32>> raw_nodes_;
     std::vector<Handle> raw_free_lists_;
     std::vector<OrderPoolAllocator> pools_;
     LinearAllocator linear_allocator_;
