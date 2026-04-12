@@ -8,7 +8,7 @@ namespace titan::core {
 // Internal Execution Helper
 // ============================================================================
 void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8_t taker_side, OrderQty trade_qty,
-                                   EventBuffer& out_events) noexcept {
+                                   DefaultEventBuffer& out_events) {
     OrderNode& maker = pool_.get_node(maker_handle);
 
     // 1. Decrease the volume of the limit order (Maker)
@@ -29,7 +29,7 @@ void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8
 // Process Limit / Market Orders
 // ============================================================================
 void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t side, Price price, OrderQty qty,
-                                   EventBuffer& out_events) noexcept {
+                                   DefaultEventBuffer& out_events) {
     // 1. SEGFAULT PROTECTION
     // Ensure the Python-generated order_id does not exceed our allocated vector capacity.
     if (order_id >= order_map_.size()) [[unlikely]] {
@@ -139,7 +139,7 @@ void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t
 // ============================================================================
 // Process Cancellations (O(1) Memory Lookup)
 // ============================================================================
-void MatchingEngine::process_cancel(uint64_t target_order_id, EventBuffer& out_events) noexcept {
+void MatchingEngine::process_cancel(uint64_t target_order_id, DefaultEventBuffer& out_events) {
     // Bounds checking protection (in case of an invalid ID from the agent)
     if (target_order_id >= order_map_.size()) [[unlikely]] {
         return;
