@@ -32,11 +32,15 @@ void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8
 // ============================================================================
 void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t side, Price price, OrderQty qty,
                                    DefaultEventBuffer& out_events) {
-    if (order_map_[order_id] != NULL_HANDLE)
-        return;  // Reject duplicate order IDs that are already active in the book.
-    // 1. SEGFAULT PROTECTION
+    // 1. SEGFAULT PROTECTION (ДОЛЖНА БЫТЬ ПЕРВОЙ!)
     // Ensure the Python-generated order_id does not exceed our allocated vector capacity.
     if (order_id >= order_map_.size()) [[unlikely]] {
+        return;
+    }
+
+    // 2. DUPLICATE ORDER PROTECTION
+    // Reject duplicate order IDs that are already active in the book.
+    if (order_map_[order_id] != NULL_HANDLE) [[unlikely]] {
         return;
     }
 

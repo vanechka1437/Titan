@@ -109,13 +109,13 @@ public:
 // ============================================================================
 class AgentState {
 public:
-    uint32_t id;
+    uint32_t id{0};
 
     // --- Network Physics (Private Parameters) ---
-    uint64_t ingress_delay;     // Latency from the agent to the exchange
-    uint64_t egress_delay;      // Latency from the exchange to the agent
-    uint64_t compute_delay;     // Computation time (inference delay)
-    uint64_t next_wakeup_time;  // Absolute time when the agent is allowed to act next
+    uint64_t ingress_delay{0};     // Latency from the agent to the exchange
+    uint64_t egress_delay{0};      // Latency from the exchange to the agent
+    uint64_t compute_delay{0};     // Computation time (inference delay)
+    uint64_t next_wakeup_time{0};  // Absolute time when the agent is allowed to act next
 
     // --- Local World View ---
     ShadowLOB shadow_lob;
@@ -123,13 +123,13 @@ public:
     // --- Pointers to Zero-Copy Arena Memory (Public Parameters) ---
     // The C++ engine will update balances by writing values directly to these
     // pointers, allowing PyTorch to instantly read the updated state.
-    float* obs_cash_ptr;
-    float* obs_inventory_ptr;
-    float* obs_pnl_ptr;
+    float* obs_cash_ptr{nullptr};
+    float* obs_inventory_ptr{nullptr};
+    float* obs_pnl_ptr{nullptr};
 
     // Hidden balances for precise math (to avoid float precision loss)
-    int64_t real_cash;
-    int32_t real_inventory;
+    int64_t real_cash{0};
+    int32_t real_inventory{0};
 
     explicit AgentState(std::size_t lob_reserve_capacity) : shadow_lob(lob_reserve_capacity) {}
 
