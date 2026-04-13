@@ -89,29 +89,26 @@ TEST_F(MemoryCoreTest, OrderPool_CapacityExhaustion) {
     EXPECT_EQ(illegal_handle, NULL_HANDLE);
 }
 
-TEST_F(MemoryCoreTest, OrderPool_ABAGenerationIncrement) {
+TEST_F(MemoryCoreTest, OrderPool_LIFOMemoryReuse) {
     PrintScenario(
-        "Verifying the ABA Protection mechanism. When a node is freed, its generation tag MUST increment. When "
-        "reallocated, it retains the new generation.");
+        "Verifying the LIFO (Last-In, First-Out) memory reuse mechanism. "
+        "When a node is freed, it must be the very first one returned on the next allocation, "
+        "guaranteeing optimal L1 cache warmth. ABA protection is now handled securely by the MatchingEngine.");
 
     std::vector<OrderNode> nodes(10);
     std::vector<Handle> free_list(10);
     OrderPoolAllocator pool;
     pool.init(nodes.data(), free_list.data(), 10);
 
-    // 1. Allocate and check initial generation
+    // 1. Allocate a handle
     Handle h1 = pool.allocate();
-    EXPECT_EQ(pool.get_node(h1).generation, 0);
 
-    // 2. Free it (simulating order cancellation)
+    // 2. Free it (simulating order cancellation or execution)
     pool.free(h1);
 
-    // 3. Re-allocate. Because free_list is LIFO (stack), we should get the exact same handle back.
+    // 3. Re-allocate. Because free_list is LIFO (stack), we MUST get the exact same handle back.
     Handle h2 = pool.allocate();
     EXPECT_EQ(h1, h2);
-
-    // 4. The generation MUST have incremented to protect delayed cancel requests.
-    EXPECT_EQ(pool.get_node(h2).generation, 1);
 }
 
 TEST_F(MemoryCoreTest, OrderPool_TheDoubleFreeNuke) {
@@ -222,9 +219,9 @@ TEST_F(MemoryCoreTest, UnifiedArena_GlobalResetFlushesState) {
 
     UnifiedMemoryArena arena(num_envs, orders_per_env, 1024, num_agents, obs_dim, 4);
 
-    arena.get_pool(0).allocate();
-    arena.get_pool(0).allocate();
-    arena.get_pool(0).allocate();
+    [[maybe_unused]] auto h1 = arena.get_pool(0).allocate();
+    [[maybe_unused]] auto h2 = arena.get_pool(0).allocate();
+    [[maybe_unused]] auto h3 = arena.get_pool(0).allocate();
     EXPECT_EQ(arena.get_pool(0).size(), orders_per_env - 3);
 
     arena.obs_ptr()[0] = 42.5f;

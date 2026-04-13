@@ -15,26 +15,14 @@ using namespace titan::core;
 class MockOrderPoolAllocator : public OrderPoolAllocator {
 public:
     std::vector<OrderNode> raw_memory;
-    std::vector<Handle> raw_handles;
+    std::vector<Handle> free_list;
 
     MockOrderPoolAllocator(uint32_t size = 100000) {
         raw_memory.resize(size);
-        raw_handles.resize(size);
+        free_list.resize(size);
 
-        // Честно инициализируем базовый HFT-аллокатор нашими векторами,
-        // теперь get_node() и allocate() работают по-настоящему.
-        this->init(raw_memory.data(), raw_handles.data(), size);
-    }
-
-    // Helper to generate a 64-bit OrderId with a valid memory handle and generation tag
-    OrderId create_order(Price p, OrderQty q, uint8_t s, uint32_t gen = 1) {
-        Handle h = this->allocate();
-        OrderNode& node = this->get_node(h);
-        node.generation = gen;
-
-        // Shift generation to upper 32 bits, keep handle in lower 32 bits
-        OrderId id = (static_cast<uint64_t>(gen) << 32) | static_cast<uint32_t>(h);
-        return id;
+        // Honestly initialize the underlying HFT allocator
+        this->init(raw_memory.data(), free_list.data(), size);
     }
 };
 
@@ -58,7 +46,7 @@ protected:
 };
 
 // ============================================================================
-// 3. TEST CASES
+// 3. TEST CASES (The Destroyer Suite)
 // ============================================================================
 
 TEST_F(LOBStateTest, EmptyBookReturnsLimits) {
@@ -73,63 +61,77 @@ TEST_F(LOBStateTest, EmptyBookReturnsLimits) {
 TEST_F(LOBStateTest, BasicO1Insertion) {
     PrintScenario(
         "Testing basic O(1) insertion into the Hot Zone. Ensuring that the bitmasks are correctly ignited and "
-        "get_best_bid/ask return the exact prices.");
+        "get_best_bid/ask return the exact prices using full 64-bit OrderIDs.");
 
-    OrderId bid_id = pool.create_order(1000, 10, 0 /* BID */);
-    OrderId ask_id = pool.create_order(1005, 10, 1 /* ASK */);
+    uint64_t bid_id = 5000000000ULL;  // Exceeds 32-bit limit to test uint64_t safety
+    uint64_t ask_id = 5000000001ULL;
 
-    lob.add_order(bid_id, 1000, 10, 0, pool);
-    lob.add_order(ask_id, 1005, 10, 1, pool);
+    lob.add_order(bid_id, 1, 1000, 10, 0, pool);
+    lob.add_order(ask_id, 2, 1005, 10, 1, pool);
 
     EXPECT_EQ(lob.get_best_bid(), 1000);
     EXPECT_EQ(lob.get_best_ask(), 1005);
 }
 
-TEST_F(LOBStateTest, CancelMiddleNodeIntrusiveList) {
+TEST_F(LOBStateTest, IntrusiveListAssassination) {
     PrintScenario(
         "Attacking the intrusive doubly-linked list. We insert 3 orders at the same price (creating a FIFO queue) and "
         "delete the middle one. The pointers MUST stitch together correctly without breaking the queue or "
         "extinguishing the bitmask prematurely.");
 
-    OrderId id1 = pool.create_order(1000, 10, 0);
-    OrderId id2 = pool.create_order(1000, 20, 0);  // Target for assassination
-    OrderId id3 = pool.create_order(1000, 30, 0);
-
-    lob.add_order(id1, 1000, 10, 0, pool);
-    lob.add_order(id2, 1000, 20, 0, pool);
-    lob.add_order(id3, 1000, 30, 0, pool);
+    Handle h1 = lob.add_order(1, 1, 1000, 10, 0, pool);
+    Handle h2 = lob.add_order(2, 1, 1000, 20, 0, pool);  // Target for assassination
+    Handle h3 = lob.add_order(3, 1, 1000, 30, 0, pool);
 
     // Remove middle node
-    lob.cancel_order(id2, pool);
+    lob.remove_order(h2, pool);
     EXPECT_EQ(lob.get_best_bid(), 1000);
 
     // Remove head node
-    lob.cancel_order(id1, pool);
+    lob.remove_order(h1, pool);
     EXPECT_EQ(lob.get_best_bid(), 1000);
 
     // Remove tail node. Now the mask must be extinguished.
-    lob.cancel_order(id3, pool);
+    lob.remove_order(h3, pool);
     EXPECT_EQ(lob.get_best_bid(), 0);
 }
 
-TEST_F(LOBStateTest, ABAMemoryReuseProtection) {
+TEST_F(LOBStateTest, ThePhantomLOBProtection) {
     PrintScenario(
-        "Testing ABA problem protection. Simulating a scenario where an order is freed by the Matching Engine, the "
-        "memory pool reuses the handle for a NEW order with a different generation tag, and a delayed cancel request "
-        "arrives for the OLD order. The LOB MUST ignore the stale cancel request.");
+        "Testing the Phantom LOB synchronization fix (reduce_level_qty). "
+        "Simulating a full execution where the engine reduces the level qty FIRST, "
+        "then removes the physical order when its volume reaches 0. The bitmask must "
+        "safely extinguish without underflowing or leaving ghost liquidity.");
 
-    OrderId original_id = pool.create_order(1000, 10, 0, 1 /* Generation 1 */);
-    lob.add_order(original_id, 1000, 10, 0, pool);
+    Handle h1 = lob.add_order(1, 1, 1000, 10, 0, pool);
 
-    // Simulate memory reuse by overriding the generation tag directly in the pool
-    Handle h = original_id & 0xFFFFFFFF;
-    pool.get_node(h).generation = 2;
+    // 1. Engine matches 10 lots. It calls reduce_level_qty FIRST.
+    lob.reduce_level_qty(0, 1000, 10);
 
-    // Attempt to cancel using the old OrderId
-    lob.cancel_order(original_id, pool);
+    // The mask should immediately extinguish
+    EXPECT_EQ(lob.get_best_bid(), 0);
 
-    // The new order must survive
-    EXPECT_EQ(lob.get_best_bid(), 1000);
+    // 2. Engine realizes order is empty, sets its internal qty to 0, and removes it
+    pool.get_node(h1).quantity = 0;
+    lob.remove_order(h1, pool);
+
+    // Best bid must STILL be 0, no math anomalies allowed
+    EXPECT_EQ(lob.get_best_bid(), 0);
+}
+
+TEST_F(LOBStateTest, NegativeUnderflowClamping) {
+    PrintScenario(
+        "Testing the int64_t total_qty fix. Deliberately attacking the engine by requesting "
+        "a reduction larger than the available liquidity. The system must clamp to 0 and "
+        "extinguish the mask, rather than underflowing into 18 quintillion.");
+
+    Handle h1 = lob.add_order(1, 1, 1000, 50, 0, pool);
+
+    // Attack: Attempt to reduce by 100, while only 50 exists
+    lob.reduce_level_qty(0, 1000, 100);
+
+    // The sign integer logic should clamp total_qty to 0, killing the level
+    EXPECT_EQ(lob.get_best_bid(), 0);
 }
 
 TEST_F(LOBStateTest, PhysicalBufferWrapAround) {
@@ -143,44 +145,50 @@ TEST_F(LOBStateTest, PhysicalBufferWrapAround) {
 
     // End of physical array
     Price high_physical_end = RING_SIZE - 1;
-    lob.add_order(pool.create_order(high_physical_end, 10, 0), high_physical_end, 10, 0, pool);
+    lob.add_order(1, 1, high_physical_end, 10, 0, pool);
 
     // Wrapped around to the start of the physical array
     Price wrapped_higher_price = RING_SIZE + 5;
-    lob.add_order(pool.create_order(wrapped_higher_price, 10, 0), wrapped_higher_price, 10, 0, pool);
+    lob.add_order(2, 1, wrapped_higher_price, 10, 0, pool);
 
     // wrapped_higher_price (index 5) is logically > high_physical_end (index 16383)
     EXPECT_EQ(lob.get_best_bid(), wrapped_higher_price);
 }
 
-TEST_F(LOBStateTest, AmortizedPagingEviction) {
+TEST_F(LOBStateTest, FlatMapAmortizedEviction) {
     PrintScenario(
-        "Testing Amortized Paging (Option 2). Simulating a massive market movement upwards. An existing order in the "
-        "Hot Zone must be completely purged from the hardware bitmasks and safely transferred to the Cold Zone "
-        "(Red-Black Tree).");
+        "Testing Amortized Paging Eviction. Simulating a massive market movement upwards. "
+        "An existing order in the Hot Zone must be completely purged from the hardware bitmasks "
+        "and safely transferred to the Cold Zone (Boost Flat Map).");
 
-    lob.add_order(pool.create_order(1000, 10, 0), 1000, 10, 0, pool);
+    lob.add_order(1, 1, 1000, 10, 0, pool);
 
-    // Jump away
+    // Jump away (Eviction triggered)
     lob.shift_window_to_center(20000);
 
-    // Fallback search should still find it
+    // Fallback search should still find it in the flat_map
     EXPECT_EQ(lob.get_best_bid(), 1000);
 }
 
-TEST_F(LOBStateTest, AmortizedPagingAbsorption) {
+TEST_F(LOBStateTest, FlatMapBulkAbsorption) {
     PrintScenario(
-        "Testing Amortized Paging (Option 2). Simulating a market crash. The window jumps back down towards old "
-        "prices. Orders resting in the Cold Zone must be instantly absorbed back into the Hot Zone, igniting the O(1) "
-        "bitmasks again.");
+        "Testing O(N) Flat Map Absorption. Simulating a market crash. The window jumps back down towards old "
+        "prices. Multiple orders resting in the Cold Zone must be instantly absorbed back into the Hot Zone, "
+        "igniting the O(1) bitmasks again using the optimized range-erase.");
 
-    lob.add_order(pool.create_order(1000, 10, 0), 1000, 10, 0, pool);
-    lob.shift_window_to_center(20000);  // Evict it
+    lob.shift_window_to_center(20000);  // Move away first
 
-    // Crash back down
+    // Populate Cold Zone directly (Market is at 20000, these go to flat_map)
+    lob.add_order(1, 1, 1000, 10, 0, pool);
+    lob.add_order(2, 1, 1001, 10, 0, pool);
+    lob.add_order(3, 1, 1002, 10, 0, pool);
+
+    EXPECT_EQ(lob.get_best_bid(), 1002);
+
+    // Crash back down: Bulk absorb [1000, 1001, 1002] in one O(N) swoop
     lob.shift_window_to_center(1005);
 
-    EXPECT_EQ(lob.get_best_bid(), 1000);
+    EXPECT_EQ(lob.get_best_bid(), 1002);
 }
 
 TEST_F(LOBStateTest, IntegerOverflowDoomsday) {
@@ -192,7 +200,7 @@ TEST_F(LOBStateTest, IntegerOverflowDoomsday) {
     Price high_price = UINT32_MAX - (RING_SIZE / 2);
 
     lob.shift_window_to_center(high_price);
-    lob.add_order(pool.create_order(high_price, 10, 0), high_price, 10, 0, pool);
+    lob.add_order(1, 1, high_price, 10, 0, pool);
 
     // Scan should safely resolve without wrap-around bugs
     EXPECT_EQ(lob.get_best_bid(), high_price);
