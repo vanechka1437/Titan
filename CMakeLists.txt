@@ -115,7 +115,23 @@ message(STATUS "[Titan] Fetching Google Test...")
 FetchContent_MakeAvailable(googletest)
 
 # ==============================================================================
-# 7. Core Library (Titan)
+# 7. Dependencies: Google Abseil (B-Tree Integration)
+# ==============================================================================
+FetchContent_Declare(
+    abseil_cpp
+    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+    GIT_TAG 20240116.2
+)
+
+# Force Abseil to compile against the project's native C++ standard
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "Use the main project's C++ standard" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "Disable Abseil internal tests" FORCE)
+
+message(STATUS "[Titan] Fetching Google Abseil...")
+FetchContent_MakeAvailable(abseil_cpp)
+
+# ==============================================================================
+# 8. Core Library (Titan)
 # ==============================================================================
 add_library(titan_core STATIC)
 
@@ -127,6 +143,7 @@ target_include_directories(titan_core PUBLIC
 target_sources(titan_core PRIVATE
     src/core/memory.cpp
     src/core/lob_state.cpp
+    src/core/matching_engine.cpp
 )
 
 # Inject the detected L3 Cache size directly into the compiler
@@ -135,11 +152,11 @@ target_compile_definitions(titan_core PUBLIC TITAN_SYSTEM_L3_BYTES=${TITAN_SYSTE
 target_link_libraries(titan_core PUBLIC Boost::boost)
 
 # ==============================================================================
-# 8. Subdirectories
+# 9. Subdirectories
 # ==============================================================================
 
 # ==============================================================================
-# 9. Tests
+# 10. Tests
 # ==============================================================================
 add_executable(titan_lob_tests
     tests/lob_state_tests.cpp
@@ -156,12 +173,32 @@ add_executable(titan_memory_tests
 
 target_link_libraries(titan_memory_tests PRIVATE titan_core gtest_main)
 
+add_executable(titan_state_tests
+    tests/state_tests.cpp
+)
+
+target_link_libraries(titan_state_tests PRIVATE titan_core gtest_main)
+
+add_executable(titan_matching_engine_tests
+    tests/matching_engine_tests.cpp
+)
+
+target_link_libraries(titan_matching_engine_tests PRIVATE titan_core gtest_main)
+
+add_executable(titan_scheduler_tests
+    tests/scheduler_tests.cpp
+)
+
+target_link_libraries(titan_scheduler_tests PRIVATE titan_core gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(titan_lob_tests)
 gtest_discover_tests(titan_memory_tests)
+gtest_discover_tests(titan_state_tests)
+gtest_discover_tests(titan_matching_engine_tests)
 
 # ==============================================================================
-# 10. Benchmarks
+# 11. Benchmarks
 # ==============================================================================
 add_executable(titan_lob_bench
     benchmarks/lob_state_bench.cpp
@@ -170,6 +207,7 @@ add_executable(titan_lob_bench
 target_link_libraries(titan_lob_bench PRIVATE
     titan_core
     benchmark::benchmark
+    absl::btree
 )
 
 add_executable(titan_memory_bench

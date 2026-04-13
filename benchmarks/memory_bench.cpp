@@ -62,7 +62,6 @@ static void BM_Burst_Boost(benchmark::State& state) {
 
 static void BM_Burst_Titan(benchmark::State& state) {
     const uint32_t batch_size = state.range(0);
-    // Добавлены параметры: num_agents = 1, obs_dim = 10, action_dim = 4
     UnifiedMemoryArena arena(1, batch_size, 1024, 1, 10, 4);
     auto& pool = arena.get_pool(0);
     std::vector<Handle> handles(batch_size);
@@ -82,7 +81,7 @@ static void BM_Burst_Titan(benchmark::State& state) {
 // ============================================================================
 // SCENARIO 2: CHURN (Interleaved Allocate & Free)
 // Simulates steady-state market making (cancel & replace).
-// Highly optimized for CPU L1 Cache.
+// Includes MEMORY MUTATION to prove L1 Cache Warmth superiority.
 // ============================================================================
 
 static void BM_Churn_System(benchmark::State& state) {
@@ -90,7 +89,9 @@ static void BM_Churn_System(benchmark::State& state) {
     for (auto _ : state) {
         for (uint32_t i = 0; i < batch_size; ++i) {
             OrderNode* node = new OrderNode();
-            benchmark::DoNotOptimize(node);
+            node->price = i;
+            node->quantity = i;
+            benchmark::DoNotOptimize(node->price);
             delete node;
         }
         benchmark::ClobberMemory();
@@ -103,7 +104,9 @@ static void BM_Churn_Boost(benchmark::State& state) {
     for (auto _ : state) {
         for (uint32_t i = 0; i < batch_size; ++i) {
             OrderNode* node = pool.malloc();
-            benchmark::DoNotOptimize(node);
+            node->price = i;
+            node->quantity = i;
+            benchmark::DoNotOptimize(node->price);
             pool.free(node);
         }
         benchmark::ClobberMemory();
@@ -112,14 +115,16 @@ static void BM_Churn_Boost(benchmark::State& state) {
 
 static void BM_Churn_Titan(benchmark::State& state) {
     const uint32_t batch_size = state.range(0);
-    // Добавлены параметры: num_agents = 1, obs_dim = 10, action_dim = 4
     UnifiedMemoryArena arena(1, 2, 1024, 1, 10, 4);  // Only need space for 1 concurrent order
     auto& pool = arena.get_pool(0);
 
     for (auto _ : state) {
         for (uint32_t i = 0; i < batch_size; ++i) {
             Handle h = pool.allocate();
-            benchmark::DoNotOptimize(h);
+            OrderNode& node = pool.get_node(h);
+            node.price = i;
+            node.quantity = i;
+            benchmark::DoNotOptimize(node.price);
             pool.free(h);
         }
         benchmark::ClobberMemory();
@@ -172,7 +177,6 @@ static void BM_Scattered_Boost(benchmark::State& state) {
 
 static void BM_Scattered_Titan(benchmark::State& state) {
     const uint32_t batch_size = state.range(0);
-    // Добавлены параметры: num_agents = 1, obs_dim = 10, action_dim = 4
     UnifiedMemoryArena arena(1, batch_size, 1024, 1, 10, 4);
     auto& pool = arena.get_pool(0);
     std::vector<Handle> handles(batch_size);
