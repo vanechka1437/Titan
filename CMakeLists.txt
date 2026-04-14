@@ -219,3 +219,13 @@ target_link_libraries(titan_memory_bench PRIVATE
     benchmark::benchmark
     Boost::boost
 )
+
+add_executable(titan_scheduler_bench
+    benchmarks/scheduler_bench.cpp
+)
+
+target_link_libraries(titan_scheduler_bench PRIVATE
+    titan_core
+    benchmark::benchmark
+    Boost::boost
+)
