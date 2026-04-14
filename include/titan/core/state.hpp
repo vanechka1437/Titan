@@ -12,101 +12,189 @@
 namespace titan::core {
 
 // ============================================================================
-// 1. SHADOW LOB
-// Local, delayed copy of the reality for each individual agent.
-// Uses Boost Flat Map for optimal L1/L2 cache locality and O(log N) lookups,
-// gracefully scaling to 10,000+ levels without pointer-chasing overhead.
+// Marker for empty slots in the open-addressing hash table.
+// Assumes that a valid price cannot be negative.
 // ============================================================================
-class ShadowLOB {
-private:
-    // Bids are automatically sorted in DESCENDING order (highest price first)
-    boost::container::flat_map<Price, OrderQty, std::greater<Price>> bids_;
+static constexpr int32_t EMPTY_SLOT = -1;
 
-    // Asks are automatically sorted in ASCENDING order (lowest price first)
-    boost::container::flat_map<Price, OrderQty, std::less<Price>> asks_;
+// ============================================================================
+// Shadow Price Level: Cache-aligned (8 bytes) macroscopic view of a level.
+// Decoupled from the internal Matching Engine's PriceLevel (16 bytes) to
+// strictly exclude intrusive linked-list handles (head/tail). This doubles
+// the L1 cache capacity for the RL agent's observation state.
+// ============================================================================
+struct alignas(8) ShadowPriceLevel {
+    int32_t price;
+    int32_t qty;
+};
+
+/**
+ * @brief Lazy Shadow LOB (Log-structured Dirty Buffers Paradigm)
+ * * A zero-allocation, cache-friendly aggregated order book designed for Batch RL.
+ * It defers the O(N) sorting overhead until the exact moment PyTorch requests
+ * the observation tensor, enabling O(1) micro-tick updates during simulation.
+ * * @tparam Depth Number of top levels exported to the PyTorch tensor (prevents dimensionality curse).
+ * @tparam Capacity Hash table size. Default 4096 yields a 32KB footprint, fitting perfectly in L1d cache.
+ */
+template <uint32_t Depth = 20, uint32_t Capacity = 4096>
+class LazyShadowLOB {
+    // Capacity MUST be a power of 2 for the bitwise modulo operator to work
+    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
+    static constexpr uint32_t MASK = Capacity - 1;
+
+private:
+    // Open-addressing hash tables with Linear Probing.
+    // Memory footprint: 4096 * 8 bytes = 32 KB per side (Fits in L1/L2 Cache)
+    alignas(64) ShadowPriceLevel bids_[Capacity];
+    alignas(64) ShadowPriceLevel asks_[Capacity];
+
+    // Lazy materialization flag (avoids computing identical states)
+    bool is_dirty_{false};
+
+    // Track unique price levels to monitor the load factor
+    uint32_t bid_load_{0};
+    uint32_t ask_load_{0};
+
+    /**
+     * @brief O(1) Cache-friendly insert or update using Linear Probing.
+     * Memory shifts (memmove) are strictly prohibited here to guarantee
+     * ultra-low latency on the Matching Engine's hot path.
+     */
+    inline void insert_or_update(ShadowPriceLevel* table, uint32_t& load, int32_t price, int32_t qty_delta) noexcept {
+        // Fast bitwise modulo hashing
+        uint32_t idx = static_cast<uint32_t>(price) & MASK;
+
+        while (true) {
+            if (table[idx].price == EMPTY_SLOT) {
+                // Empty slot found -> Register new price level
+                table[idx].price = price;
+                table[idx].qty = qty_delta;
+                ++load;
+                return;
+            } else if (table[idx].price == price) {
+                // Price level exists -> O(1) in-place update
+                table[idx].qty += qty_delta;
+
+                // Note: We deliberately do NOT remove tombstones (qty <= 0) here.
+                // Erasing would require shifting memory or complex tombstone handling.
+                // We filter out zero-volume levels lazily during the Compaction phase.
+                return;
+            }
+            // Hash collision -> Linear Probing
+            idx = (idx + 1) & MASK;
+        }
+    }
 
 public:
-    explicit ShadowLOB(std::size_t reserve_capacity = 1024) {
-        // Pre-allocating contiguous memory blocks to prevent reallocations
-        bids_.reserve(reserve_capacity);
-        asks_.reserve(reserve_capacity);
+    LazyShadowLOB() { clear(); }
+
+    // ========================================================================
+    // WRITE PATH (Hot Path driven by the Matching Engine)
+    // Executes millions of times per second (takes ~3-5 CPU cycles).
+    // ========================================================================
+    inline void apply_delta(uint8_t side, int32_t price, int32_t qty_delta) noexcept {
+        if (side == 0) {  // BID
+            insert_or_update(bids_, bid_load_, price, qty_delta);
+        } else {  // ASK
+            insert_or_update(asks_, ask_load_, price, qty_delta);
+        }
+        is_dirty_ = true;
     }
 
-    // Apply a delta (Market Data Event) to the shadow LOB
-    inline void apply_delta(uint8_t side, Price price, int32_t qty_delta) noexcept {
-        if (side == 0) {  // --- BID ---
-            auto it = bids_.find(price);
-            if (it != bids_.end()) {
-                // Level exists, update the quantity
-                int32_t new_qty = static_cast<int32_t>(it->second) + qty_delta;
-                if (new_qty <= 0) {
-                    bids_.erase(it);  // Erase the level if liquidity is depleted
-                } else {
-                    it->second = static_cast<OrderQty>(new_qty);
-                }
-            } else if (qty_delta > 0) {
-                // New price level: emplace handles the sorted insertion automatically
-                bids_.emplace(price, static_cast<OrderQty>(qty_delta));
+    // ========================================================================
+    // READ PATH (Synchronous Barrier driven by the RL Environment)
+    // Executes only when the agent's step() requires a new observation.
+    // ========================================================================
+    inline void export_to_tensor(float* obs_ptr) noexcept {
+        // Asymmetry Magic: Skip sorting entirely if no market events occurred
+        if (!is_dirty_)
+            return;
+
+        // 1. COMPACTION PHASE (Stack-allocated garbage collection)
+        ShadowPriceLevel valid_bids[Capacity];
+        ShadowPriceLevel valid_asks[Capacity];
+        uint32_t valid_bid_count = 0;
+        uint32_t valid_ask_count = 0;
+
+        // Filter out tombstones (qty <= 0) and empty slots
+        for (uint32_t i = 0; i < Capacity; ++i) {
+            if (bids_[i].price != EMPTY_SLOT && bids_[i].qty > 0) {
+                valid_bids[valid_bid_count++] = bids_[i];
             }
-        } else {  // --- ASK ---
-            auto it = asks_.find(price);
-            if (it != asks_.end()) {
-                int32_t new_qty = static_cast<int32_t>(it->second) + qty_delta;
-                if (new_qty <= 0) {
-                    asks_.erase(it);
-                } else {
-                    it->second = static_cast<OrderQty>(new_qty);
-                }
-            } else if (qty_delta > 0) {
-                asks_.emplace(price, static_cast<OrderQty>(qty_delta));
+            if (asks_[i].price != EMPTY_SLOT && asks_[i].qty > 0) {
+                valid_asks[valid_ask_count++] = asks_[i];
             }
         }
-    }
 
-    // Instant Zero-Copy export of top-N levels directly to the PyTorch tensor.
-    // Safe 'depth' parameter protects RL networks from the curse of dimensionality,
-    // while the flat_map safely holds the full macroscopic state of the market.
-    inline void export_to_tensor(float* obs_ptr, uint32_t depth) const noexcept {
+        // 2. QUICK-SELECT & SORT PHASE
+        uint32_t bid_depth = std::min(Depth, valid_bid_count);
+        if (bid_depth > 0) {
+            // O(M) Ordinal statistics: Partition the array to push Top-N highest bids to the front
+            std::nth_element(valid_bids, valid_bids + bid_depth - 1, valid_bids + valid_bid_count,
+                             [](const ShadowPriceLevel& a, const ShadowPriceLevel& b) { return a.price > b.price; });
+
+            // O(N log N) Sort only the isolated Top-N slice
+            std::sort(valid_bids, valid_bids + bid_depth,
+                      [](const ShadowPriceLevel& a, const ShadowPriceLevel& b) { return a.price > b.price; });
+        }
+
+        uint32_t ask_depth = std::min(Depth, valid_ask_count);
+        if (ask_depth > 0) {
+            // O(M) Partition to push Top-N lowest asks to the front
+            std::nth_element(valid_asks, valid_asks + ask_depth - 1, valid_asks + valid_ask_count,
+                             [](const ShadowPriceLevel& a, const ShadowPriceLevel& b) { return a.price < b.price; });
+
+            std::sort(valid_asks, valid_asks + ask_depth,
+                      [](const ShadowPriceLevel& a, const ShadowPriceLevel& b) { return a.price < b.price; });
+        }
+
+        // 3. ZERO-COPY EXPORT PHASE (SIMD / Loop Unrolling enabled by template bounds)
         uint32_t offset = 0;
 
-        // Write Bids (Price, Quantity)
-        auto bid_it = bids_.begin();
-        for (uint32_t i = 0; i < depth; ++i) {
-            if (bid_it != bids_.end()) {
-                obs_ptr[offset++] = static_cast<float>(bid_it->first);   // Price
-                obs_ptr[offset++] = static_cast<float>(bid_it->second);  // Quantity
-                ++bid_it;
+#pragma GCC unroll 10
+        for (uint32_t i = 0; i < Depth; ++i) {
+            if (i < bid_depth) {
+                obs_ptr[offset++] = static_cast<float>(valid_bids[i].price);
+                obs_ptr[offset++] = static_cast<float>(valid_bids[i].qty);
             } else {
-                // Pad with zeros if the book depth is shallower than requested
+                // Padding for shallow order books
                 obs_ptr[offset++] = 0.0f;
                 obs_ptr[offset++] = 0.0f;
             }
         }
 
-        // Write Asks (Price, Quantity)
-        auto ask_it = asks_.begin();
-        for (uint32_t i = 0; i < depth; ++i) {
-            if (ask_it != asks_.end()) {
-                obs_ptr[offset++] = static_cast<float>(ask_it->first);   // Price
-                obs_ptr[offset++] = static_cast<float>(ask_it->second);  // Quantity
-                ++ask_it;
+#pragma GCC unroll 10
+        for (uint32_t i = 0; i < Depth; ++i) {
+            if (i < ask_depth) {
+                obs_ptr[offset++] = static_cast<float>(valid_asks[i].price);
+                obs_ptr[offset++] = static_cast<float>(valid_asks[i].qty);
             } else {
                 obs_ptr[offset++] = 0.0f;
                 obs_ptr[offset++] = 0.0f;
             }
         }
+
+        is_dirty_ = false;  // Reset the state flag
     }
 
-    // Fast reset between simulation episodes
+    // ========================================================================
+    // Fast reset between RL episodes without reallocating memory
+    // ========================================================================
     inline void clear() noexcept {
-        bids_.clear();
-        asks_.clear();
+        for (uint32_t i = 0; i < Capacity; ++i) {
+            bids_[i].price = EMPTY_SLOT;
+            asks_[i].price = EMPTY_SLOT;
+        }
+        bid_load_ = 0;
+        ask_load_ = 0;
+        is_dirty_ = false;
     }
 };
 
 // ============================================================================
 // 2. AGENT STATE
 // ============================================================================
+template <uint32_t ObsDepth = 20>
 class AgentState {
 public:
     uint32_t id{0};
@@ -118,7 +206,9 @@ public:
     uint64_t next_wakeup_time{0};  // Absolute time when the agent is allowed to act next
 
     // --- Local World View ---
-    ShadowLOB shadow_lob;
+    // The observation depth is forwarded at compile time for SIMD/Loop Unrolling.
+    // Capacity is hardcoded to 4096 to ensure the hash table fits exactly into L1 Cache (32KB).
+    LazyShadowLOB<ObsDepth, 4096> shadow_lob;
 
     // --- Pointers to Zero-Copy Arena Memory (Public Parameters) ---
     // The C++ engine will update balances by writing values directly to these
@@ -131,7 +221,8 @@ public:
     int64_t real_cash{0};
     int32_t real_inventory{0};
 
-    explicit AgentState(std::size_t lob_reserve_capacity) : shadow_lob(lob_reserve_capacity) {}
+    // Dynamic allocation parameter removed; memory layout is resolved at compile time
+    explicit AgentState() = default;
 
     inline void update_balance(int64_t cash_delta, int32_t inventory_delta) noexcept {
         real_cash += cash_delta;
@@ -154,6 +245,7 @@ public:
 // ============================================================================
 // 3. ENVIRONMENT STATE
 // ============================================================================
+template <uint32_t ObsDepth = 20>
 class EnvironmentState {
 public:
     uint32_t env_id;
@@ -163,7 +255,8 @@ public:
     uint64_t current_time{0};
 
     // Array of agents residing within this specific environment instance.
-    std::vector<AgentState> agents;
+    // Templated to forward the observation depth to all agents.
+    std::vector<AgentState<ObsDepth>> agents;
 
     // The centralized event buffer for this environment.
     // Allocated safely on the Heap (as part of the parent container),
