@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <iostream>
+#include <vector>
+
 #include "titan/core/state.hpp"
 
 using namespace titan::core;
@@ -10,32 +13,38 @@ protected:
 };
 
 TEST_F(StateTest, ShadowLOB_TensorExport_Padding) {
-    PrintScenario("Verifying that ShadowLOB pads missing levels with zeros in the tensor.");
+    PrintScenario("Verifying that LazyShadowLOB pads missing levels with zeros in the tensor.");
 
-    ShadowLOB lob(10);
-    lob.apply_delta(0, 1000, 50);  // Bid
-    lob.apply_delta(1, 1010, 30);  // Ask
+    LazyShadowLOB<2, 4096> lob;
+
+    lob.apply_delta(0, 1000, 50);
+    lob.apply_delta(1, 1010, 30);
 
     std::vector<float> obs(8, -1.0f);
-    lob.export_to_tensor(obs.data(), 2);
+
+    lob.export_to_tensor(obs.data());
 
     EXPECT_EQ(obs[0], 1000.0f);
     EXPECT_EQ(obs[1], 50.0f);
     EXPECT_EQ(obs[2], 0.0f);
     EXPECT_EQ(obs[3], 0.0f);
+
+    EXPECT_EQ(obs[4], 1010.0f);
+    EXPECT_EQ(obs[5], 30.0f);
+    EXPECT_EQ(obs[6], 0.0f);
+    EXPECT_EQ(obs[7], 0.0f);
 }
 
 TEST_F(StateTest, AgentState_BalanceUpdate_Precision) {
     PrintScenario("Testing cash and inventory updates via sync with Python tensors.");
 
-    // Fix: AgentState requires lob_reserve_capacity in constructor
-    AgentState agent(1024);
+    AgentState<20> agent;
+
     float obs_cash = 0.0f;
     float obs_inv = 0.0f;
     agent.obs_cash_ptr = &obs_cash;
     agent.obs_inventory_ptr = &obs_inv;
 
-    // Update balances: update_balance(cash_delta, inventory_delta)
     agent.update_balance(-1000, 10);
 
     EXPECT_EQ(agent.real_inventory, 10);
@@ -47,12 +56,11 @@ TEST_F(StateTest, AgentState_BalanceUpdate_Precision) {
 TEST_F(StateTest, EnvironmentReset_FullCleanup) {
     PrintScenario("Ensuring EnvironmentState::reset() clears the EventBuffer and Agents.");
 
-    EnvironmentState env;
+    EnvironmentState<20> env;
     env.env_id = 42;
     env.current_time = 123456789;
 
-    // Correctly initialize agent and add to environment
-    AgentState a1(1024);
+    AgentState<20> a1;
     a1.real_cash = 1000;
     env.agents.push_back(std::move(a1));
 
@@ -64,4 +72,8 @@ TEST_F(StateTest, EnvironmentReset_FullCleanup) {
     EXPECT_EQ(env.current_time, 0);
     EXPECT_EQ(env.event_buffer.count, 0);
     EXPECT_EQ(env.agents[0].real_cash, 0);
+
+    std::vector<float> obs(80, -1.0f);
+    env.agents[0].shadow_lob.export_to_tensor(obs.data());
+    EXPECT_EQ(obs[0], 0.0f);
 }
