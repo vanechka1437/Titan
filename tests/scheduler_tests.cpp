@@ -13,7 +13,7 @@ TEST_F(SchedulerTest, ChronologicalOrdering) {
     PrintScenario("Ensuring events are popped in strict nanosecond order.");
 
     // Fix: Pass max_capacity to constructor
-    Fast4AryHeap heap(1024);
+    FastScheduler heap(1024);
 
     // Fix: Use push(time, payload_idx) signature
     heap.push(500, 1);  // Time 500, Payload index 1
@@ -39,7 +39,7 @@ TEST_F(SchedulerTest, ChronologicalOrdering) {
 TEST_F(SchedulerTest, HeapResetAndReuse) {
     PrintScenario("Verifying that clear() allows immediate deterministic reuse.");
 
-    Fast4AryHeap heap(128);
+    FastScheduler heap(128);
     heap.push(100, 1);
     heap.clear();
     EXPECT_TRUE(heap.empty());
