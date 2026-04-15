@@ -92,82 +92,129 @@ TEST_F(StateTest, ShadowLOB_ZeroQtyBitClearance) {
 }
 
 // ============================================================================
-// 3. SLIDING WINDOW: RIGHT SHIFT (BULL MARKET)
+// 3. SLIDING WINDOW: RIGHT SHIFT & EVICTION TO COLD ZONE
 // ============================================================================
-TEST_F(StateTest, ShadowLOB_RecenterRight) {
-    PrintScenario("Testing window shift during an upward price trend (memmove right).");
+TEST_F(StateTest, ShadowLOB_RecenterRight_Eviction) {
+    PrintScenario("Testing window shift during an upward trend. Old prices must safely move to Cold Zone.");
 
     ShadowLOB<4, 1024> lob;
 
-    // Anchor = max(0, 1000 - 512) = 488. Window = [488, 1512)
+    // Anchor = max(0, 1000 - 512) = 488. Window = [488, 1511]
     lob.apply_delta(0, 1000, 10);
     lob.apply_delta(0, 1400, 20);
 
     // Trigger right shift. Target 1800.
-    // New Anchor = 1800 - 512 = 1288. Window = [1288, 2312)
-    // 1000 falls out. 1400 survives. 1800 added.
+    // New Anchor = 1800 - 512 = 1288. Window = [1288, 2311]
+    // 1000 falls out of the new Hot Zone and is safely evicted to the Cold Zone.
     lob.apply_delta(0, 1800, 30);
 
     std::vector<float> obs(16, -1.0f);
     lob.export_to_tensor(obs.data());
 
+    // Export reads Hot Zone first, then supplements with Cold Zone
     EXPECT_EQ(obs[0], 1800.0f);
     EXPECT_EQ(obs[1], 30.0f);
     EXPECT_EQ(obs[2], 1400.0f);
     EXPECT_EQ(obs[3], 20.0f);
-    EXPECT_EQ(obs[4], 0.0f);  // 1000 was safely dropped
+    EXPECT_EQ(obs[4], 1000.0f);
+    EXPECT_EQ(obs[5], 10.0f);  // Recovered from Cold Zone!
+    EXPECT_EQ(obs[6], 0.0f);
+    EXPECT_EQ(obs[7], 0.0f);
 }
 
 // ============================================================================
-// 4. SLIDING WINDOW: LEFT SHIFT (BEAR MARKET)
+// 4. DEEP PASSIVE LIQUIDITY (NO-RECENTER OPTIMIZATION)
 // ============================================================================
-TEST_F(StateTest, ShadowLOB_RecenterLeft) {
-    PrintScenario("Testing window shift during a downward price crash (memmove left).");
+TEST_F(StateTest, ShadowLOB_DeepPassive_DirectColdZone) {
+    PrintScenario("Testing that deep passive orders go directly to Cold Zone without expensive memmoves.");
 
     ShadowLOB<4, 1024> lob;
 
-    // Anchor = 2000 - 512 = 1488. Window = [1488, 2512)
+    // Anchor = 2000 - 512 = 1488. Window = [1488, 2511]
     lob.apply_delta(0, 2000, 10);
     lob.apply_delta(0, 1600, 20);
 
-    // Trigger left shift. Target 1000.
-    // New Anchor = 1000 - 512 = 488. Window = [488, 1512)
-    // 2000 falls out. 1600 falls out (1600 is > 1512? No, wait. 488 + 1024 = 1512. 1600 falls out!).
+    // This is a deep bid (below the Hot Zone).
+    // It should NOT trigger a recenter, but be placed in the Cold Zone directly.
     lob.apply_delta(0, 1000, 30);
 
     std::vector<float> obs(16, -1.0f);
     lob.export_to_tensor(obs.data());
 
-    EXPECT_EQ(obs[0], 1000.0f);
-    EXPECT_EQ(obs[1], 30.0f);
-    EXPECT_EQ(obs[2], 0.0f);  // 1600 and 2000 are out of bounds and wiped
+    // 2000 and 1600 from Hot Zone, 1000 from Cold Zone fallback.
+    EXPECT_EQ(obs[0], 2000.0f);
+    EXPECT_EQ(obs[1], 10.0f);
+    EXPECT_EQ(obs[2], 1600.0f);
+    EXPECT_EQ(obs[3], 20.0f);
+    EXPECT_EQ(obs[4], 1000.0f);
+    EXPECT_EQ(obs[5], 30.0f);  // Safely tracked
+    EXPECT_EQ(obs[6], 0.0f);
+    EXPECT_EQ(obs[7], 0.0f);
 }
 
 // ============================================================================
-// 5. SLIDING WINDOW: EXTREME GAP (MARKET HALT)
+// 5. SLIDING WINDOW: EXTREME GAP (FLASH CRASH)
 // ============================================================================
-TEST_F(StateTest, ShadowLOB_ExtremeRecenterWipe) {
-    PrintScenario("Testing massive price jump > WindowSize. Must trigger full clear.");
+TEST_F(StateTest, ShadowLOB_ExtremeGap_ColdZoneSurvival) {
+    PrintScenario("Testing massive price jump > WindowSize. Must clear arrays but preserve liquidity in Cold Zone.");
 
     ShadowLOB<4, 1024> lob;
 
-    // Anchor = 1000 - 512 = 488
+    // Anchor = 1000 - 512 = 488. Window = [488, 1511]
     lob.apply_delta(0, 1000, 10);
 
-    // Jump by 100,000. Offset is way larger than WindowSize.
-    // Must trigger memset clear instead of memmove.
+    // Jump by ~100,000. Offset is larger than WindowSize.
+    // Triggers memset clear, but 1000 must survive by being moved to Cold Zone.
     lob.apply_delta(0, 100000, 50);
 
     std::vector<float> obs(16, -1.0f);
     lob.export_to_tensor(obs.data());
 
     EXPECT_EQ(obs[0], 100000.0f);
-    EXPECT_EQ(obs[1], 50.0f);
-    EXPECT_EQ(obs[2], 0.0f);  // Old data wiped
+    EXPECT_EQ(obs[1], 50.0f);  // Hot Zone
+    EXPECT_EQ(obs[2], 1000.0f);
+    EXPECT_EQ(obs[3], 10.0f);  // Saved by Cold Zone
+    EXPECT_EQ(obs[4], 0.0f);
+    EXPECT_EQ(obs[5], 0.0f);
 }
 
 // ============================================================================
-// 6. BITMASK BOUNDARY DESTRUCTION TEST (L1/L2 INTEGRITY)
+// 6. COLD ZONE ABSORPTION (MEAN REVERSION)
+// ============================================================================
+TEST_F(StateTest, ShadowLOB_ColdZone_Absorption) {
+    PrintScenario("Testing liquidity returning from Cold Zone back to Hot Zone.");
+
+    ShadowLOB<4, 1024> lob;
+
+    lob.apply_delta(0, 1000, 10);  // Anchor=488. Hot=[488, 1511]
+
+    // FIX: Using side=1 (ASK) for the 5000 price level as intended by the scenario.
+    lob.apply_delta(1, 5000, 20);  // Recenter. Anchor=4488. Hot=[4488, 5511]. 1000 -> Cold Zone
+
+    // Bring market back down
+    // Ask at 1200 forces recenter down. Anchor = 1200 - 512 = 688. Hot=[688, 1711]
+    // Bid 1000 (currently in Cold Zone) should be naturally absorbed into the Hot Zone arrays!
+    // Ask 5000 (currently in Hot Zone) should be evicted to Cold Zone!
+    lob.apply_delta(1, 1200, 30);
+
+    std::vector<float> obs(16, -1.0f);
+    lob.export_to_tensor(obs.data());
+
+    // Bids: 1000 from Hot Zone (successfully absorbed!)
+    EXPECT_EQ(obs[0], 1000.0f);
+    EXPECT_EQ(obs[1], 10.0f);
+    EXPECT_EQ(obs[2], 0.0f);
+    EXPECT_EQ(obs[3], 0.0f);
+
+    // Asks: 1200 from Hot Zone, 5000 from Cold Zone
+    EXPECT_EQ(obs[8], 1200.0f);
+    EXPECT_EQ(obs[9], 30.0f);
+    EXPECT_EQ(obs[10], 5000.0f);
+    EXPECT_EQ(obs[11], 20.0f);
+}
+
+// ============================================================================
+// 7. BITMASK BOUNDARY DESTRUCTION TEST (L1/L2 INTEGRITY)
 // ============================================================================
 TEST_F(StateTest, ShadowLOB_CrossBoundaryBitmasks) {
     PrintScenario("Testing L1/L2 mask behavior right on the 63/64 bit boundaries.");
@@ -195,10 +242,7 @@ TEST_F(StateTest, ShadowLOB_CrossBoundaryBitmasks) {
 }
 
 // ============================================================================
-// 7. AGENT STATE EVENT STREAM PADDING & TRUNCATION
-// ============================================================================
-// ============================================================================
-// 7. AGENT STATE EVENT STREAM PADDING & TRUNCATION
+// 8. AGENT STATE EVENT STREAM PADDING & TRUNCATION
 // ============================================================================
 TEST_F(StateTest, AgentState_EventStreamExport) {
     PrintScenario("Validating AgentState zero-copy event stream extraction and newest-event truncation.");
@@ -243,7 +287,7 @@ TEST_F(StateTest, AgentState_EventStreamExport) {
 }
 
 // ============================================================================
-// 8. ENVIRONMENT RESET
+// 9. ENVIRONMENT RESET
 // ============================================================================
 TEST_F(StateTest, EnvironmentReset_FullCleanup) {
     PrintScenario("Ensuring EnvironmentState::reset() clears the LOBs and Time.");
