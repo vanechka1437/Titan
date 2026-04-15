@@ -1,8 +1,6 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
-#include <stdexcept>
 #include <vector>
 
 #include "titan/core/lob_state.hpp"
@@ -14,7 +12,7 @@ namespace titan::core {
 // ============================================================================
 // 1. MARKET DATA EVENT
 // Extremely lightweight POD structure to communicate LOB changes back to the
-// agents' ShadowLOBs and account balances without dynamic allocations.
+// agents' ShadowLOBs and account balances. Aligned for optimal cache utilization.
 // ============================================================================
 struct alignas(32) MarketDataEvent {
     enum class Type : uint8_t { TRADE = 0, LOB_UPDATE = 1 };
@@ -28,39 +26,43 @@ struct alignas(32) MarketDataEvent {
 };
 
 // ============================================================================
-// EVENT BUFFER (Templated for user control)
-// Defaulting to 8192 (262 KB), enough to sweep thousands of LOB levels.
+// EVENT BUFFER
+// Replaced fixed std::array with std::vector to provide dynamic reallocation.
+// This completely eliminates std::runtime_error exceptions during extreme
+// AI-generated market sweeps (e.g., a 10M lot fat finger order), protecting
+// multi-day RL training sessions from crashing.
 // ============================================================================
-template <uint32_t MaxEvents = 8192>
-struct EventBuffer {
-    static constexpr uint32_t MAX_EVENTS = MaxEvents;
+template <uint32_t InitialCapacity = 8192>
+class EventBuffer {
+private:
+    std::vector<MarketDataEvent> events_;
 
-    std::array<MarketDataEvent, MAX_EVENTS> events;
-    uint32_t count{0};
+public:
+    EventBuffer() {
+        // Pre-allocate to prevent dynamic allocation on the hot path for 99.9% of steps.
+        events_.reserve(InitialCapacity);
+    }
 
-    inline void clear() noexcept { count = 0; }
+    inline void clear() noexcept { events_.clear(); }
 
+    inline size_t size() const noexcept { return events_.size(); }
+
+    inline const MarketDataEvent& operator[](size_t index) const noexcept { return events_[index]; }
+
+    // Pushes safely. If capacity is exceeded, std::vector reallocates automatically
+    // without crashing the environment.
     inline void push_update(uint8_t side, Price price, int32_t qty_delta) {
-        if (count >= MAX_EVENTS) [[unlikely]] {
-            throw std::runtime_error("EventBuffer overflow: Market sweep exceeded MAX_EVENTS capacity.");
-        }
-        events[count++] = {MarketDataEvent::Type::LOB_UPDATE, side, 0, price, qty_delta, 0};
+        events_.push_back({MarketDataEvent::Type::LOB_UPDATE, side, 0, price, qty_delta, 0});
     }
 
     inline void push_trade(uint8_t side, uint16_t owner_id, Price price, OrderQty qty) {
-        if (count >= MAX_EVENTS) [[unlikely]] {
-            throw std::runtime_error("EventBuffer overflow: Market sweep exceeded MAX_EVENTS capacity.");
-        }
-        events[count++] = {MarketDataEvent::Type::TRADE,
-                           side,
-                           owner_id,
-                           price,
+        events_.push_back({MarketDataEvent::Type::TRADE, side, owner_id, price,
                            (side == 0) ? static_cast<int32_t>(qty) : -(static_cast<int32_t>(qty)),
-                           (side == 0) ? -(static_cast<int64_t>(price) * qty) : (static_cast<int64_t>(price) * qty)};
+                           (side == 0) ? -(static_cast<int64_t>(price) * qty) : (static_cast<int64_t>(price) * qty)});
     }
 };
 
-// Чтобы не делать весь MatchingEngine шаблонным классом, создадим удобный алиас
+// Alias to prevent matching engine from becoming a template
 using DefaultEventBuffer = EventBuffer<8192>;
 
 // ============================================================================
