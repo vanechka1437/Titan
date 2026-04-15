@@ -225,7 +225,7 @@ add_executable(titan_state_tests
 target_link_libraries(titan_state_tests PRIVATE titan_core gtest_main)
 
 add_executable(titan_matching_engine_tests
-    tests/matching_engine_tests.cpp
+   tests/matching_engine_tests.cpp
 )
 
 target_link_libraries(titan_matching_engine_tests PRIVATE titan_core gtest_main)
@@ -291,6 +291,15 @@ add_executable(titan_shadowlob_bench2
 )
 
 target_link_libraries(titan_shadowlob_bench2 PRIVATE
+   titan_core
+   benchmark::benchmark
+)
+
+add_executable(titan_matching_engine_bench
+    benchmarks/matching_engine_bench.cpp
+)
+
+target_link_libraries(titan_matching_engine_bench PRIVATE
    titan_core
    benchmark::benchmark
 )
