@@ -54,9 +54,9 @@ TEST_F(MatchingEngineTest, PassiveOrderPlacement) {
     engine->process_order(1, 100, 0 /* Bid */, 1000, 50, events);
 
     EXPECT_EQ(engine->get_lob().get_best_bid(), 1000);
-    EXPECT_EQ(events.count, 1);
+    EXPECT_EQ(events.size(), 1u);
 
-    const auto& ev = events.events[0];
+    const auto& ev = events[0];
     EXPECT_EQ(ev.type, MarketDataEvent::Type::LOB_UPDATE);
     EXPECT_EQ(ev.price, 1000);
     EXPECT_EQ(ev.qty_delta, 50);  // Positive delta for added liquidity
@@ -78,14 +78,14 @@ TEST_F(MatchingEngineTest, FullExecutionGeneratesCorrectEvents) {
     EXPECT_EQ(engine->get_lob().get_best_bid(), 0);
 
     // We expect 3 events: Maker Trade, Taker Trade, LOB Update (removal)
-    EXPECT_EQ(events.count, 3);
+    EXPECT_EQ(events.size(), 3u);
 
     bool found_maker_trade = false;
     bool found_taker_trade = false;
     bool found_lob_update = false;
 
-    for (uint32_t i = 0; i < events.count; ++i) {
-        const auto& ev = events.events[i];
+    for (size_t i = 0; i < events.size(); ++i) {
+        const auto& ev = events[i];
         if (ev.type == MarketDataEvent::Type::TRADE) {
             if (ev.owner_id == 100)
                 found_maker_trade = true;
@@ -122,7 +122,7 @@ TEST_F(MatchingEngineTest, PythonSegfaultProtection) {
 
     // Book must remain untouched
     EXPECT_EQ(engine->get_lob().get_best_bid(), 0);
-    EXPECT_EQ(events.count, 0);
+    EXPECT_EQ(events.size(), 0u);
 }
 
 TEST_F(MatchingEngineTest, SentinelMarketOrdersDoNotRest) {
@@ -162,9 +162,9 @@ TEST_F(MatchingEngineTest, WashTradingPrevention) {
 
     // We expect exactly ONE event: LOB_UPDATE indicating the resting order was cancelled.
     // There MUST NOT be any TRADE events (no fake volume generated).
-    EXPECT_EQ(events.count, 1);
-    EXPECT_EQ(events.events[0].type, MarketDataEvent::Type::LOB_UPDATE);
-    EXPECT_EQ(events.events[0].qty_delta, -50);
+    EXPECT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].type, MarketDataEvent::Type::LOB_UPDATE);
+    EXPECT_EQ(events[0].qty_delta, -50);
 }
 
 TEST_F(MatchingEngineTest, SafeDoubleCancellation) {
@@ -178,14 +178,14 @@ TEST_F(MatchingEngineTest, SafeDoubleCancellation) {
 
     // Valid Cancel
     engine->process_cancel(5, events);
-    EXPECT_EQ(events.count, 1);  // LOB_UPDATE (removal)
+    EXPECT_EQ(events.size(), 1u);  // LOB_UPDATE (removal)
     events.clear();
 
     // Invalid / Duplicate Cancel
     engine->process_cancel(5, events);
 
     // Should do absolutely nothing
-    EXPECT_EQ(events.count, 0);
+    EXPECT_EQ(events.size(), 0u);
 }
 
 TEST_F(MatchingEngineTest, ResetClearsO1Map) {
@@ -204,5 +204,5 @@ TEST_F(MatchingEngineTest, ResetClearsO1Map) {
     engine->process_cancel(10, events);
 
     // It should be ignored, because reset() wiped the mapping
-    EXPECT_EQ(events.count, 0);
+    EXPECT_EQ(events.size(), 0u);
 }
