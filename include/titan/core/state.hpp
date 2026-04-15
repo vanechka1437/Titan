@@ -1,236 +1,336 @@
 #pragma once
 
 #include <algorithm>
-#include <boost/container/flat_map.hpp>
+#include <bit>
+#include <cmath>
 #include <cstdint>
-#include <functional>
+#include <cstring>
 #include <vector>
 
+// ============================================================================
+// SYSTEM HARDWARE FALLBACK CONFIGURATIONS
+// These macros are overridden by CMake during compilation based on the target
+// CPU architecture. If undefined, we fallback to a safe default (32KB L1).
+// ============================================================================
+#ifndef TITAN_SYSTEM_L1_BYTES
+#define TITAN_SYSTEM_L1_BYTES (32ull * 1024)  // 32 KB L1 Data Cache
+#endif
+
+// ============================================================================
+// CROSS-PLATFORM HARDWARE BIT MANIPULATION HELPERS
+// Ensures MSVC doesn't hoist loops causing infinite stalls during mask scanning.
+// Utilizes hardware instructions (BSR/BSF or lzcnt/tzcnt) for O(1) execution.
+// ============================================================================
+#ifdef _MSC_VER
+#include <intrin.h>
+inline uint32_t pop_msb(uint64_t& mask) noexcept {
+    unsigned long index;
+    _BitScanReverse64(&index, mask);
+    mask &= ~(1ULL << index);  // Forcefully clear the bit to break MSVC cache
+    return static_cast<uint32_t>(index);
+}
+inline uint32_t pop_lsb(uint64_t& mask) noexcept {
+    unsigned long index;
+    _BitScanForward64(&index, mask);
+    mask &= (mask - 1);  // Kernighan's trick to clear the least significant bit
+    return static_cast<uint32_t>(index);
+}
+#else
+inline uint32_t pop_msb(uint64_t& mask) noexcept {
+    uint32_t index = 63 - std::countl_zero(mask);
+    mask &= ~(1ULL << index);
+    return index;
+}
+inline uint32_t pop_lsb(uint64_t& mask) noexcept {
+    uint32_t index = std::countr_zero(mask);
+    mask &= (mask - 1);
+    return index;
+}
+#endif
+
+// Core engine definitions (Provides Price, OrderId, Handle, DefaultEventBuffer)
 #include "titan/core/matching_engine.hpp"
+#include "titan/core/memory.hpp"
 #include "titan/core/types.hpp"
 
 namespace titan::core {
 
 // ============================================================================
-// Marker for empty slots in the open-addressing hash table.
-// Assumes that a valid price cannot be negative.
+// Compile-Time Hardware Optimization for ShadowLOB
 // ============================================================================
-static constexpr int32_t EMPTY_SLOT = -1;
+namespace detail {
+// 8 bytes per price level (bid_qty + ask_qty), ignoring bitmask overhead
+constexpr size_t SHADOW_TARGET_BYTES = TITAN_SYSTEM_L1_BYTES;
+constexpr size_t SHADOW_TARGET_LEVELS = SHADOW_TARGET_BYTES / 8;
+constexpr size_t OPTIMAL_SHADOW_WINDOW = std::bit_floor(SHADOW_TARGET_LEVELS);
+constexpr size_t FINAL_SHADOW_WINDOW = std::clamp<size_t>(OPTIMAL_SHADOW_WINDOW, 1024, 16384);
+}  // namespace detail
 
 // ============================================================================
-// Shadow Price Level: Cache-aligned (8 bytes) macroscopic view of a level.
-// Decoupled from the internal Matching Engine's PriceLevel (16 bytes) to
-// strictly exclude intrusive linked-list handles (head/tail). This doubles
-// the L1 cache capacity for the RL agent's observation state.
+// SHADOW LOB: Flat Array Bitmask Hierarchy for RL Agents
+// Uses a Sliding Window (Flat Array) to prevent wrap-around parsing logic
+// during tensor materialization, guaranteeing 100% correct sorting for RL.
+// Fits perfectly into the L1d cache.
 // ============================================================================
-struct alignas(8) ShadowPriceLevel {
-    int32_t price;
-    int32_t qty;
-};
-
-/**
- * @brief Lazy Shadow LOB (Log-structured Dirty Buffers Paradigm)
- * * A zero-allocation, cache-friendly aggregated order book designed for Batch RL.
- * It defers the O(N) sorting overhead until the exact moment PyTorch requests
- * the observation tensor, enabling O(1) micro-tick updates during simulation.
- * * @tparam Depth Number of top levels exported to the PyTorch tensor (prevents dimensionality curse).
- * @tparam Capacity Hash table size. Default 4096 yields a 32KB footprint, fitting perfectly in L1d cache.
- */
-template <uint32_t Depth = 20, uint32_t Capacity = 4096>
-class LazyShadowLOB {
-    // Capacity MUST be a power of 2 for the bitwise modulo operator to work
-    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
-    static constexpr uint32_t MASK = Capacity - 1;
+template <uint32_t Depth = 20, uint32_t WindowSize = detail::FINAL_SHADOW_WINDOW>
+class ShadowLOB {
+    static_assert((WindowSize & (WindowSize - 1)) == 0, "WindowSize must be a power of 2");
 
 private:
-    // Open-addressing hash tables with Linear Probing.
-    // Memory footprint: 4096 * 8 bytes = 32 KB per side (Fits in L1/L2 Cache)
-    alignas(64) ShadowPriceLevel bids_[Capacity];
-    alignas(64) ShadowPriceLevel asks_[Capacity];
+    static constexpr uint32_t L1_SIZE = WindowSize / 64;
+    static constexpr uint32_t L2_SIZE = (L1_SIZE + 63) / 64;
+    static constexpr Price UNINITIALIZED_ANCHOR = 0xFFFFFFFF;
 
-    // Lazy materialization flag (avoids computing identical states)
-    bool is_dirty_{false};
+    // Bitmask hierarchy for Bids
+    uint64_t bid_l1_[L1_SIZE]{0};
+    uint64_t bid_l2_[L2_SIZE]{0};
+    int32_t bid_qty_[WindowSize]{0};
 
-    // Track unique price levels to monitor the load factor
-    uint32_t bid_load_{0};
-    uint32_t ask_load_{0};
+    // Bitmask hierarchy for Asks
+    uint64_t ask_l1_[L1_SIZE]{0};
+    uint64_t ask_l2_[L2_SIZE]{0};
+    int32_t ask_qty_[WindowSize]{0};
 
-    /**
-     * @brief O(1) Cache-friendly insert or update using Linear Probing.
-     * Memory shifts (memmove) are strictly prohibited here to guarantee
-     * ultra-low latency on the Matching Engine's hot path.
-     */
-    inline void insert_or_update(ShadowPriceLevel* table, uint32_t& load, int32_t price, int32_t qty_delta) noexcept {
-        // Fast bitwise modulo hashing
-        uint32_t idx = static_cast<uint32_t>(price) & MASK;
+    Price anchor_price_{UNINITIALIZED_ANCHOR};
 
-        while (true) {
-            if (table[idx].price == EMPTY_SLOT) {
-                // Empty slot found -> Register new price level
-                table[idx].price = price;
-                table[idx].qty = qty_delta;
-                ++load;
-                return;
-            } else if (table[idx].price == price) {
-                // Price level exists -> O(1) in-place update
-                table[idx].qty += qty_delta;
+    // ========================================================================
+    // Re-centering Operation (Rare event, O(N) execution time)
+    // Shifts the memory window to center the new price, preserving structure.
+    // ========================================================================
+    inline void recenter(Price target_price) noexcept {
+        Price new_anchor = (target_price > WindowSize / 2) ? (target_price - WindowSize / 2) : 0;
 
-                // Note: We deliberately do NOT remove tombstones (qty <= 0) here.
-                // Erasing would require shifting memory or complex tombstone handling.
-                // We filter out zero-volume levels lazily during the Compaction phase.
-                return;
-            }
-            // Hash collision -> Linear Probing
-            idx = (idx + 1) & MASK;
+        if (anchor_price_ == UNINITIALIZED_ANCHOR) {
+            anchor_price_ = new_anchor;
+            return;
         }
+
+        int64_t offset = static_cast<int64_t>(new_anchor) - static_cast<int64_t>(anchor_price_);
+
+        if (std::abs(offset) >= static_cast<int64_t>(WindowSize)) {
+            clear_arrays();
+        } else if (offset > 0) {
+            // Shift left (market going up)
+            std::memmove(bid_qty_, bid_qty_ + offset, (WindowSize - offset) * sizeof(int32_t));
+            std::memmove(ask_qty_, ask_qty_ + offset, (WindowSize - offset) * sizeof(int32_t));
+            std::memset(bid_qty_ + (WindowSize - offset), 0, offset * sizeof(int32_t));
+            std::memset(ask_qty_ + (WindowSize - offset), 0, offset * sizeof(int32_t));
+        } else {
+            // Shift right (market going down)
+            int64_t shift = -offset;
+            std::memmove(bid_qty_ + shift, bid_qty_, (WindowSize - shift) * sizeof(int32_t));
+            std::memmove(ask_qty_ + shift, ask_qty_, (WindowSize - shift) * sizeof(int32_t));
+            std::memset(bid_qty_, 0, shift * sizeof(int32_t));
+            std::memset(ask_qty_, 0, shift * sizeof(int32_t));
+        }
+
+        anchor_price_ = new_anchor;
+        rebuild_bitmasks();
+    }
+
+    // O(N) reconstruction, highly optimized for L1 cache bounds
+    inline void rebuild_bitmasks() noexcept {
+        std::memset(bid_l1_, 0, sizeof(bid_l1_));
+        std::memset(bid_l2_, 0, sizeof(bid_l2_));
+        std::memset(ask_l1_, 0, sizeof(ask_l1_));
+        std::memset(ask_l2_, 0, sizeof(ask_l2_));
+
+        for (uint32_t idx = 0; idx < WindowSize; ++idx) {
+            if (bid_qty_[idx] > 0) {
+                uint32_t l1_idx = idx >> 6;
+                bid_l1_[l1_idx] |= (1ULL << (idx & 63));
+                bid_l2_[l1_idx >> 6] |= (1ULL << (l1_idx & 63));
+            }
+            if (ask_qty_[idx] > 0) {
+                uint32_t l1_idx = idx >> 6;
+                ask_l1_[l1_idx] |= (1ULL << (idx & 63));
+                ask_l2_[l1_idx >> 6] |= (1ULL << (l1_idx & 63));
+            }
+        }
+    }
+
+    inline void clear_arrays() noexcept {
+        std::memset(bid_l1_, 0, sizeof(bid_l1_));
+        std::memset(bid_l2_, 0, sizeof(bid_l2_));
+        std::memset(bid_qty_, 0, sizeof(bid_qty_));
+        std::memset(ask_l1_, 0, sizeof(ask_l1_));
+        std::memset(ask_l2_, 0, sizeof(ask_l2_));
+        std::memset(ask_qty_, 0, sizeof(ask_qty_));
     }
 
 public:
-    LazyShadowLOB() { clear(); }
+    ShadowLOB() = default;
 
     // ========================================================================
-    // WRITE PATH (Hot Path driven by the Matching Engine)
-    // Executes millions of times per second (takes ~3-5 CPU cycles).
+    // WRITE PATH (Hot Path driven by the Engine Event Dispatcher)
+    // Executes in O(1) time (~1 CPU cycle) unless a re-centering is triggered.
     // ========================================================================
-    inline void apply_delta(uint8_t side, int32_t price, int32_t qty_delta) noexcept {
+    inline void apply_delta(uint8_t side, Price price, int32_t qty_delta) noexcept {
+        if (anchor_price_ == UNINITIALIZED_ANCHOR || price < anchor_price_ || price >= anchor_price_ + WindowSize) {
+            recenter(price);
+        }
+
+        uint32_t idx = price - anchor_price_;
+        uint32_t l1_idx = idx >> 6;
+        uint32_t l2_idx = l1_idx >> 6;
+
         if (side == 0) {  // BID
-            insert_or_update(bids_, bid_load_, price, qty_delta);
+            bid_qty_[idx] += qty_delta;
+            if (bid_qty_[idx] > 0) {
+                bid_l1_[l1_idx] |= (1ULL << (idx & 63));
+                bid_l2_[l2_idx] |= (1ULL << (l1_idx & 63));
+            } else {
+                bid_l1_[l1_idx] &= ~(1ULL << (idx & 63));
+                if (bid_l1_[l1_idx] == 0)
+                    bid_l2_[l2_idx] &= ~(1ULL << (l1_idx & 63));
+            }
         } else {  // ASK
-            insert_or_update(asks_, ask_load_, price, qty_delta);
+            ask_qty_[idx] += qty_delta;
+            if (ask_qty_[idx] > 0) {
+                ask_l1_[l1_idx] |= (1ULL << (idx & 63));
+                ask_l2_[l2_idx] |= (1ULL << (l1_idx & 63));
+            } else {
+                ask_l1_[l1_idx] &= ~(1ULL << (idx & 63));
+                if (ask_l1_[l1_idx] == 0)
+                    ask_l2_[l2_idx] &= ~(1ULL << (l1_idx & 63));
+            }
         }
-        is_dirty_ = true;
     }
 
     // ========================================================================
-    // READ PATH (Synchronous Barrier driven by the RL Environment)
-    // Executes only when the agent's step() requires a new observation.
+    // READ PATH (Synchronous Barrier Export to PyTorch)
+    // Employs hardware instruction sets to locate active prices from registers.
+    // Guarantees mathematically strictly ordered tensors for RL models.
     // ========================================================================
-    inline void export_to_tensor(float* obs_ptr) noexcept {
-        // Asymmetry Magic: Skip sorting entirely if no market events occurred
-        if (!is_dirty_)
-            return;
-
-        // 1. COMPACTION PHASE (Stack-allocated garbage collection)
-        ShadowPriceLevel valid_bids[Capacity];
-        ShadowPriceLevel valid_asks[Capacity];
-        uint32_t valid_bid_count = 0;
-        uint32_t valid_ask_count = 0;
-
-        // Filter out tombstones (qty <= 0) and empty slots
-        for (uint32_t i = 0; i < Capacity; ++i) {
-            if (bids_[i].price != EMPTY_SLOT && bids_[i].qty > 0) {
-                valid_bids[valid_bid_count++] = bids_[i];
-            }
-            if (asks_[i].price != EMPTY_SLOT && asks_[i].qty > 0) {
-                valid_asks[valid_ask_count++] = asks_[i];
-            }
-        }
-
-        // 2. QUICK-SELECT & SORT PHASE
-        uint32_t bid_depth = std::min(Depth, valid_bid_count);
-        if (bid_depth > 0) {
-            // O(M) Ordinal statistics: Partition the array to push Top-N highest bids to the front
-            std::nth_element(valid_bids, valid_bids + bid_depth - 1, valid_bids + valid_bid_count,
-                             [](const ShadowPriceLevel& a, const ShadowPriceLevel& b) { return a.price > b.price; });
-
-            // O(N log N) Sort only the isolated Top-N slice
-            std::sort(valid_bids, valid_bids + bid_depth,
-                      [](const ShadowPriceLevel& a, const ShadowPriceLevel& b) { return a.price > b.price; });
-        }
-
-        uint32_t ask_depth = std::min(Depth, valid_ask_count);
-        if (ask_depth > 0) {
-            // O(M) Partition to push Top-N lowest asks to the front
-            std::nth_element(valid_asks, valid_asks + ask_depth - 1, valid_asks + valid_ask_count,
-                             [](const ShadowPriceLevel& a, const ShadowPriceLevel& b) { return a.price < b.price; });
-
-            std::sort(valid_asks, valid_asks + ask_depth,
-                      [](const ShadowPriceLevel& a, const ShadowPriceLevel& b) { return a.price < b.price; });
-        }
-
-        // 3. ZERO-COPY EXPORT PHASE (SIMD / Loop Unrolling enabled by template bounds)
+    inline void export_to_tensor(float* obs_ptr) const noexcept {
         uint32_t offset = 0;
+        uint32_t count = 0;
 
-#pragma GCC unroll 10
-        for (uint32_t i = 0; i < Depth; ++i) {
-            if (i < bid_depth) {
-                obs_ptr[offset++] = static_cast<float>(valid_bids[i].price);
-                obs_ptr[offset++] = static_cast<float>(valid_bids[i].qty);
-            } else {
-                // Padding for shallow order books
-                obs_ptr[offset++] = 0.0f;
-                obs_ptr[offset++] = 0.0f;
+        // Bids: Scan MSB to LSB (Highest price downwards)
+        for (int32_t l2 = L2_SIZE - 1; l2 >= 0 && count < Depth; --l2) {
+            uint64_t mask2 = bid_l2_[l2];
+            while (mask2 && count < Depth) {
+                uint32_t bit2 = pop_msb(mask2);
+                uint32_t l1_idx = (l2 << 6) + bit2;
+                uint64_t mask1 = bid_l1_[l1_idx];
+
+                while (mask1 && count < Depth) {
+                    uint32_t bit1 = pop_msb(mask1);
+                    uint32_t idx = (l1_idx << 6) + bit1;
+
+                    obs_ptr[offset++] = static_cast<float>(anchor_price_ + idx);
+                    obs_ptr[offset++] = static_cast<float>(bid_qty_[idx]);
+                    count++;
+                }
             }
         }
-
-#pragma GCC unroll 10
-        for (uint32_t i = 0; i < Depth; ++i) {
-            if (i < ask_depth) {
-                obs_ptr[offset++] = static_cast<float>(valid_asks[i].price);
-                obs_ptr[offset++] = static_cast<float>(valid_asks[i].qty);
-            } else {
-                obs_ptr[offset++] = 0.0f;
-                obs_ptr[offset++] = 0.0f;
-            }
+        // Zero-padding for missing bid levels
+        while (count++ < Depth) {
+            obs_ptr[offset++] = 0.0f;
+            obs_ptr[offset++] = 0.0f;
         }
 
-        is_dirty_ = false;  // Reset the state flag
+        // Asks: Scan LSB to MSB (Lowest price upwards)
+        count = 0;
+        for (uint32_t l2 = 0; l2 < L2_SIZE && count < Depth; ++l2) {
+            uint64_t mask2 = ask_l2_[l2];
+            while (mask2 && count < Depth) {
+                uint32_t bit2 = pop_lsb(mask2);
+                uint32_t l1_idx = (l2 << 6) + bit2;
+                uint64_t mask1 = ask_l1_[l1_idx];
+
+                while (mask1 && count < Depth) {
+                    uint32_t bit1 = pop_lsb(mask1);
+                    uint32_t idx = (l1_idx << 6) + bit1;
+
+                    obs_ptr[offset++] = static_cast<float>(anchor_price_ + idx);
+                    obs_ptr[offset++] = static_cast<float>(ask_qty_[idx]);
+                    count++;
+                }
+            }
+        }
+        // Zero-padding for missing ask levels
+        while (count++ < Depth) {
+            obs_ptr[offset++] = 0.0f;
+            obs_ptr[offset++] = 0.0f;
+        }
     }
 
-    // ========================================================================
-    // Fast reset between RL episodes without reallocating memory
-    // ========================================================================
     inline void clear() noexcept {
-        for (uint32_t i = 0; i < Capacity; ++i) {
-            bids_[i].price = EMPTY_SLOT;
-            asks_[i].price = EMPTY_SLOT;
-        }
-        bid_load_ = 0;
-        ask_load_ = 0;
-        is_dirty_ = false;
+        clear_arrays();
+        anchor_price_ = UNINITIALIZED_ANCHOR;
     }
 };
 
 // ============================================================================
 // 2. AGENT STATE
+// Represents an isolated actor within the market environment.
 // ============================================================================
 template <uint32_t ObsDepth = 20>
 class AgentState {
 public:
     uint32_t id{0};
 
-    // --- Network Physics (Private Parameters) ---
-    uint64_t ingress_delay{0};     // Latency from the agent to the exchange
-    uint64_t egress_delay{0};      // Latency from the exchange to the agent
-    uint64_t compute_delay{0};     // Computation time (inference delay)
-    uint64_t next_wakeup_time{0};  // Absolute time when the agent is allowed to act next
+    // --- Network Physics Parameters ---
+    uint64_t ingress_delay{0};     // Latency: Agent -> Exchange
+    uint64_t egress_delay{0};      // Latency: Exchange -> Agent
+    uint64_t compute_delay{0};     // Agent's inference/decision latency
+    uint64_t next_wakeup_time{0};  // Absolute engine epoch for next allowed action
 
     // --- Local World View ---
-    // The observation depth is forwarded at compile time for SIMD/Loop Unrolling.
-    // Capacity is hardcoded to 4096 to ensure the hash table fits exactly into L1 Cache (32KB).
-    LazyShadowLOB<ObsDepth, 4096> shadow_lob;
+    ShadowLOB<ObsDepth> shadow_lob;
 
-    // --- Pointers to Zero-Copy Arena Memory (Public Parameters) ---
-    // The C++ engine will update balances by writing values directly to these
-    // pointers, allowing PyTorch to instantly read the updated state.
+    // --- Zero-Copy Arena Pointers ---
+    // Direct memory mapping to PyTorch tensors for instantaneous observation reads
     float* obs_cash_ptr{nullptr};
     float* obs_inventory_ptr{nullptr};
     float* obs_pnl_ptr{nullptr};
+    float* obs_event_stream_ptr{nullptr};
 
-    // Hidden balances for precise math (to avoid float precision loss)
+    // --- Precise Accounting ---
     int64_t real_cash{0};
     int32_t real_inventory{0};
 
-    // Dynamic allocation parameter removed; memory layout is resolved at compile time
     explicit AgentState() = default;
 
     inline void update_balance(int64_t cash_delta, int32_t inventory_delta) noexcept {
         real_cash += cash_delta;
         real_inventory += inventory_delta;
 
-        // Synchronize with the Python tensor
-        *obs_cash_ptr = static_cast<float>(real_cash);
-        *obs_inventory_ptr = static_cast<float>(real_inventory);
+        if (obs_cash_ptr)
+            *obs_cash_ptr = static_cast<float>(real_cash);
+        if (obs_inventory_ptr)
+            *obs_inventory_ptr = static_cast<float>(real_inventory);
+    }
+
+    // ========================================================================
+    // Event Stream Zero-Copy Materialization
+    // Copies centralized environment events into the agent's tensor slice.
+    // Fills remaining buffer space with zero-padding to maintain matrix shape.
+    // ========================================================================
+    template <typename EventBuffer>
+    inline void export_events_to_tensor(const EventBuffer& event_buffer, uint32_t max_events) const noexcept {
+        if (!obs_event_stream_ptr)
+            return;
+
+        uint32_t buffer_size = static_cast<uint32_t>(event_buffer.size());
+        uint32_t count = std::min(buffer_size, max_events);
+        uint32_t offset = 0;
+
+        uint32_t start_idx = (buffer_size > max_events) ? (buffer_size - max_events) : 0;
+
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& ev = event_buffer[start_idx + i];
+            obs_event_stream_ptr[offset++] = static_cast<float>(ev.timestamp);
+            obs_event_stream_ptr[offset++] = static_cast<float>(ev.action_type);
+            obs_event_stream_ptr[offset++] = static_cast<float>(ev.price);
+            obs_event_stream_ptr[offset++] = static_cast<float>(ev.qty);
+        }
+
+        uint32_t remaining_floats = (max_events - count) * 4;
+        if (remaining_floats > 0) {
+            std::memset(obs_event_stream_ptr + offset, 0, remaining_floats * sizeof(float));
+        }
     }
 
     inline void reset() noexcept {
@@ -238,36 +338,27 @@ public:
         real_cash = 0;
         real_inventory = 0;
         shadow_lob.clear();
-        // Arena pointers are not changed, as the underlying memory lives forever
     }
 };
 
 // ============================================================================
 // 3. ENVIRONMENT STATE
+// The global simulation sandbox tracking physics and causality.
 // ============================================================================
 template <uint32_t ObsDepth = 20>
 class EnvironmentState {
 public:
     uint32_t env_id;
 
-    // Each environment possesses its own independent nanosecond clock
-    // critical for precise causality tracking across RL episodes.
-    uint64_t current_time{0};
+    uint64_t current_time{0};  // Shared environment nanosecond clock
 
-    // Array of agents residing within this specific environment instance.
-    // Templated to forward the observation depth to all agents.
     std::vector<AgentState<ObsDepth>> agents;
 
-    // The centralized event buffer for this environment.
-    // Allocated safely on the Heap (as part of the parent container),
-    // guaranteeing zero dynamic allocations during the hot loop while
-    // completely preventing Stack Overflow exceptions.
+    // Centralized event buffer allocated safely in heap to prevent stack overflow
     DefaultEventBuffer event_buffer;
 
-    // Pointer to the localized Matching Engine governing this environment.
     MatchingEngine* engine = nullptr;
 
-    // Instantly resets the environment physics and agents to epoch 0
     inline void reset() noexcept {
         current_time = 0;
         event_buffer.clear();
