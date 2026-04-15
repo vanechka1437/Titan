@@ -285,3 +285,12 @@ target_link_libraries(titan_shadowlob_bench PRIVATE
    Boost::boost
    absl::btree
 )
+
+add_executable(titan_shadowlob_bench2
+    benchmarks/shadowlob_bench2.cpp
+)
+
+target_link_libraries(titan_shadowlob_bench2 PRIVATE
+   titan_core
+   benchmark::benchmark
+)
