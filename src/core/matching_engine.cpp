@@ -147,7 +147,8 @@ void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t
 // ============================================================================
 // Process Cancellations (O(1) Memory Lookup)
 // ============================================================================
-void MatchingEngine::process_cancel(uint64_t target_order_id, DefaultEventBuffer& out_events) {
+void MatchingEngine::process_cancel(uint64_t target_order_id, uint16_t requesting_owner_id,
+                                    DefaultEventBuffer& out_events) {
     // Bounds checking protection (in case of an invalid ID from the agent)
     if (target_order_id >= order_map_.size()) [[unlikely]] {
         return;
@@ -161,6 +162,9 @@ void MatchingEngine::process_cancel(uint64_t target_order_id, DefaultEventBuffer
     }
 
     OrderNode& node = pool_.get_node(h);
+    if (node.owner_id != requesting_owner_id) [[unlikely]] {
+        return;  // Reject cancellation attempts from agents who do not own the order
+    }
     uint8_t side = node.side;
     Price p = node.price;
     OrderQty q = node.quantity;

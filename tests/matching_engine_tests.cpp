@@ -108,6 +108,35 @@ TEST_F(MatchingEngineTest, FullExecutionGeneratesCorrectEvents) {
     EXPECT_TRUE(found_lob_update);
 }
 
+// ============================================================================
+// CRITICAL: ANTI-GRIEFING AUTHORIZATION TEST
+// ============================================================================
+TEST_F(MatchingEngineTest, AntiGriefingProtection) {
+    PrintScenario(
+        "Testing Authorization (Anti-Griefing). An agent must NOT be able to cancel "
+        "an order owned by another agent. The engine must silently reject unauthorized "
+        "cancel requests to protect the RL sandbox from malicious or hallucinating agents.");
+
+    // Agent 100 places a Bid with order_id = 7
+    engine->process_order(7, 100, 0 /* Bid */, 1000, 50, events);
+    events.clear();
+
+    // Agent 200 maliciously tries to cancel Agent 100's order
+    engine->process_cancel(7, 200 /* malicious owner_id */, events);
+
+    // The order should still be alive and well in the order book
+    EXPECT_EQ(engine->get_lob().get_best_bid(), 1000);
+    EXPECT_EQ(events.size(), 0u);  // No LOB_UPDATE removal event should be generated
+
+    // Agent 100 legitimately cancels their own order
+    engine->process_cancel(7, 100 /* correct owner_id */, events);
+
+    // Now it should be successfully removed
+    EXPECT_EQ(engine->get_lob().get_best_bid(), 0);
+    EXPECT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].qty_delta, -50);
+}
+
 TEST_F(MatchingEngineTest, PythonSegfaultProtection) {
     PrintScenario(
         "Attacking the O(1) Vector Mapping. Python sends an order_id that massively exceeds "
@@ -118,7 +147,7 @@ TEST_F(MatchingEngineTest, PythonSegfaultProtection) {
 
     // Should NOT crash
     engine->process_order(malicious_id, 100, 0, 1000, 50, events);
-    engine->process_cancel(malicious_id, events);
+    engine->process_cancel(malicious_id, 100, events);
 
     // Book must remain untouched
     EXPECT_EQ(engine->get_lob().get_best_bid(), 0);
@@ -177,12 +206,12 @@ TEST_F(MatchingEngineTest, SafeDoubleCancellation) {
     events.clear();
 
     // Valid Cancel
-    engine->process_cancel(5, events);
+    engine->process_cancel(5, 100, events);
     EXPECT_EQ(events.size(), 1u);  // LOB_UPDATE (removal)
     events.clear();
 
     // Invalid / Duplicate Cancel
-    engine->process_cancel(5, events);
+    engine->process_cancel(5, 100, events);
 
     // Should do absolutely nothing
     EXPECT_EQ(events.size(), 0u);
@@ -201,7 +230,7 @@ TEST_F(MatchingEngineTest, ResetClearsO1Map) {
 
     // Next Episode: Try to cancel the order from Episode 1
     events.clear();
-    engine->process_cancel(10, events);
+    engine->process_cancel(10, 100, events);
 
     // It should be ignored, because reset() wiped the mapping
     EXPECT_EQ(events.size(), 0u);

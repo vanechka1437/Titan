@@ -96,7 +96,7 @@ public:
                        DefaultEventBuffer& out_events);
 
     // 2. Process Cancellations for O(1) lookup and removal
-    void process_cancel(uint64_t target_order_id, DefaultEventBuffer& out_events);
+    void process_cancel(uint64_t target_order_id, uint16_t requesting_owner_id, DefaultEventBuffer& out_events);
 
     // 3. Fast reset between RL episodes
     void reset() noexcept;
