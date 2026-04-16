@@ -564,10 +564,10 @@ public:
 
         for (uint32_t i = 0; i < count; ++i) {
             const auto& ev = event_buffer[start_idx + i];
-            obs_event_stream_ptr[offset++] = static_cast<float>(ev.timestamp);
-            obs_event_stream_ptr[offset++] = static_cast<float>(ev.action_type);
+            obs_event_stream_ptr[offset++] = static_cast<float>(ev.type);  // TRADE(0) или LOB_UPDATE(1)
+            obs_event_stream_ptr[offset++] = static_cast<float>(ev.side);  // 0 (Bid) или 1 (Ask)
             obs_event_stream_ptr[offset++] = static_cast<float>(ev.price);
-            obs_event_stream_ptr[offset++] = static_cast<float>(ev.qty);
+            obs_event_stream_ptr[offset++] = static_cast<float>(ev.qty_delta);
         }
 
         uint32_t remaining_floats = (max_events - count) * 4;
