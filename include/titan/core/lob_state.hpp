@@ -13,19 +13,28 @@
 #define TITAN_SYSTEM_L3_BYTES (16ull * 1024 * 1024)  // 16 MB
 #endif
 
+#include <absl/container/btree_map.h>
+template <typename K, typename V, typename Compare = std::less<K>>
+using ColdZoneMap = absl::btree_map<K, V, Compare>;
+
 namespace titan::core {
 
-using Price = uint32_t;
-using OrderId = uint64_t;
+// ============================================================================
+// Price Level: Cache-aligned (32 bytes) node for the Limit Order Book
+// Exactly 2 PriceLevels fit into a standard 64-byte CPU cache line.
+// ============================================================================
+struct alignas(32) PriceLevel {
+    // --- 8-byte fields (8 bytes) ---
+    OrderQty total_qty{0};
 
-// ============================================================================
-// Price Level: Cache-aligned (16 bytes) node for the Limit Order Book
-// ============================================================================
-struct alignas(16) PriceLevel {
+    // --- 4-byte fields (12 bytes) ---
+    Price actual_price{0};  // Tag for O(1) lazy clearing during ring collisions
     Handle head{NULL_HANDLE};
     Handle tail{NULL_HANDLE};
-    int64_t total_qty{0};
-    Price actual_price{0};  // Tag for O(1) lazy clearing during ring collisions
+
+    // --- Padding ---
+    // Total used: 20 bytes. Padding required for 32-byte alignment: 12 bytes.
+    uint8_t _padding[12]{0};
 };
 
 // ============================================================================
@@ -36,6 +45,7 @@ namespace detail {
 constexpr size_t TARGET_MEMORY_BYTES = TITAN_SYSTEM_L3_BYTES / 8;
 
 // 2. Calculate capacity based on struct size
+// (Automatically scales down since PriceLevel is now 32 bytes)
 constexpr size_t TARGET_LEVELS = TARGET_MEMORY_BYTES / sizeof(PriceLevel);
 
 // 3. Floor to nearest power of 2 for fast bitwise arithmetic
@@ -74,8 +84,8 @@ private:
     Price anchor_price_{0};  // Base price for sliding window offset
 
     // --- Cold Zone: Overflow Trees ---
-    std::map<Price, PriceLevel> cold_bids_;
-    std::map<Price, PriceLevel> cold_asks_;
+    ColdZoneMap<Price, PriceLevel> cold_bids_;
+    ColdZoneMap<Price, PriceLevel> cold_asks_;
 
     // --- Internal Helpers ---
 
@@ -147,7 +157,7 @@ public:
     // --- Public API ---
 
     // Core insertion. Returns the Handle for O(1) mapping in the MatchingEngine.
-    Handle add_order(OrderId id, uint16_t owner_id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool);
+    Handle add_order(OrderId id, OwnerId owner_id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool);
 
     // O(1) extraction of an order using its memory handle.
     void remove_order(Handle h, OrderPoolAllocator& pool) noexcept;

@@ -17,12 +17,14 @@ namespace titan::core {
 struct alignas(32) MarketDataEvent {
     enum class Type : uint8_t { TRADE = 0, LOB_UPDATE = 1 };
 
-    Type type;
-    uint8_t side;       // 0: Bid, 1: Ask
-    uint16_t owner_id;  // Agent who owns the triggered order
+    OrderQty qty_delta;   // Positive for additions, negative for cancels/trades
+    OrderQty cash_delta;  // For TRADE events: how much money was exchanged
     Price price;
-    int32_t qty_delta;   // Positive for additions, negative for cancels/trades
-    int64_t cash_delta;  // For TRADE events: how much money was exchanged
+    OwnerId owner_id;  // Agent who owns the triggered order
+    Type type;
+    uint8_t side;  // 0: Bid, 1: Ask
+
+    uint8_t _padding[8]{0};  // Padding to make the struct 32 bytes
 };
 
 // ============================================================================
@@ -51,14 +53,14 @@ public:
 
     // Pushes safely. If capacity is exceeded, std::vector reallocates automatically
     // without crashing the environment.
-    inline void push_update(uint8_t side, Price price, int32_t qty_delta) {
-        events_.push_back({MarketDataEvent::Type::LOB_UPDATE, side, 0, price, qty_delta, 0});
+    inline void push_update(uint8_t side, Price price, OrderQty qty_delta) {
+        events_.push_back({qty_delta, 0, price, 0, MarketDataEvent::Type::LOB_UPDATE, side});
     }
 
-    inline void push_trade(uint8_t side, uint16_t owner_id, Price price, OrderQty qty) {
-        events_.push_back({MarketDataEvent::Type::TRADE, side, owner_id, price,
-                           (side == 0) ? static_cast<int32_t>(qty) : -(static_cast<int32_t>(qty)),
-                           (side == 0) ? -(static_cast<int64_t>(price) * qty) : (static_cast<int64_t>(price) * qty)});
+    inline void push_trade(uint8_t side, OwnerId owner_id, Price price, OrderQty qty) {
+        events_.push_back({(side == 0) ? static_cast<OrderQty>(qty) : -(static_cast<OrderQty>(qty)),
+                           (side == 0) ? -(static_cast<OrderQty>(price) * qty) : (static_cast<OrderQty>(price) * qty),
+                           price, owner_id, MarketDataEvent::Type::TRADE, side});
     }
 };
 
@@ -82,7 +84,7 @@ private:
     // --- Internal Execution Helpers ---
 
     // Core function to execute a trade between an incoming order and an existing resting order
-    void execute_trade(Handle maker_handle, uint16_t taker_id, uint8_t side, OrderQty remaining_qty,
+    void execute_trade(Handle maker_handle, OwnerId taker_id, uint8_t side, OrderQty remaining_qty,
                        DefaultEventBuffer& out_events);
 
 public:
@@ -92,11 +94,11 @@ public:
     // 1. Process new Limit/Market Orders.
     // This function will check for spread crossing, call execute_trade() in a loop
     // if necessary, and push the remainder to lob_.add_order().
-    void process_order(uint64_t order_id, uint16_t owner_id, uint8_t side, Price price, OrderQty qty,
+    void process_order(OrderId order_id, OwnerId owner_id, uint8_t side, Price price, OrderQty qty,
                        DefaultEventBuffer& out_events);
 
     // 2. Process Cancellations for O(1) lookup and removal
-    void process_cancel(uint64_t target_order_id, uint16_t requesting_owner_id, DefaultEventBuffer& out_events);
+    void process_cancel(OrderId target_order_id, OwnerId requesting_owner_id, DefaultEventBuffer& out_events);
 
     // 3. Fast reset between RL episodes
     void reset() noexcept;

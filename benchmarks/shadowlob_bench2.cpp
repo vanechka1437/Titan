@@ -10,6 +10,7 @@
 
 // Native Titan includes
 #include "titan/core/state.hpp"
+#include "titan/core/types.hpp"
 
 using namespace titan::core;
 
@@ -18,8 +19,8 @@ using namespace titan::core;
 // ============================================================================
 struct MarketEvent {
     uint8_t side;
-    int32_t price;
-    int32_t qty;
+    Price price;
+    OrderQty qty;
 };
 
 // ============================================================================
@@ -107,11 +108,11 @@ std::vector<MarketEvent> generate_realistic_market(uint64_t max_events) {
             current_price = 1.0;
 
         // 2. Simulate Order Quantity (incorporating partial fills and cancellations)
-        int32_t qty = qty_dist(gen);
+        OrderQty qty = qty_dist(gen);
         if (qty == 0)
             qty = 1;
 
-        stream[i] = {static_cast<uint8_t>(side_dist(gen)), static_cast<int32_t>(current_price), qty};
+        stream[i] = {static_cast<uint8_t>(side_dist(gen)), static_cast<Price>(current_price), qty};
     }
     return stream;
 }

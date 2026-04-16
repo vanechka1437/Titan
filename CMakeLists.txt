@@ -194,7 +194,7 @@ target_sources(titan_core PRIVATE
 # Inject the detected L3 Cache size directly into the compiler
 target_compile_definitions(titan_core PUBLIC TITAN_SYSTEM_L3_BYTES=${TITAN_SYSTEM_L3_BYTES})
 
-target_link_libraries(titan_core PUBLIC Boost::boost)
+target_link_libraries(titan_core PUBLIC Boost::boost absl::btree)
 
 # ==============================================================================
 # 9. Subdirectories

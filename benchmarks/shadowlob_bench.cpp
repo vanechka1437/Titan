@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "titan/core/types.hpp"
+
 // Requires Boost for flat_map
 #include <boost/container/flat_map.hpp>
 
@@ -24,8 +26,8 @@ using namespace titan::core;
 // ============================================================================
 struct MarketEvent {
     uint8_t side;
-    int32_t price;
-    int32_t qty;
+    Price price;
+    OrderQty qty;
 };
 
 // ============================================================================
@@ -34,11 +36,11 @@ struct MarketEvent {
 // ============================================================================
 class BTreeLOB {
 private:
-    absl::btree_map<int32_t, int32_t, std::greater<int32_t>> bids_;
-    absl::btree_map<int32_t, int32_t, std::less<int32_t>> asks_;
+    absl::btree_map<Price, OrderQty, std::greater<Price>> bids_;
+    absl::btree_map<Price, OrderQty, std::less<Price>> asks_;
 
 public:
-    inline void apply_delta(uint8_t side, int32_t price, int32_t qty) noexcept {
+    inline void apply_delta(uint8_t side, Price price, OrderQty qty) noexcept {
         if (side == 0) {
             bids_[price] += qty;
             if (bids_[price] <= 0)
@@ -86,11 +88,11 @@ public:
 // ============================================================================
 class FlatMapLOB {
 private:
-    boost::container::flat_map<int32_t, int32_t, std::greater<int32_t>> bids_;
-    boost::container::flat_map<int32_t, int32_t, std::less<int32_t>> asks_;
+    boost::container::flat_map<Price, OrderQty, std::greater<Price>> bids_;
+    boost::container::flat_map<Price, OrderQty, std::less<Price>> asks_;
 
 public:
-    inline void apply_delta(uint8_t side, int32_t price, int32_t qty) noexcept {
+    inline void apply_delta(uint8_t side, Price price, OrderQty qty) noexcept {
         if (side == 0) {
             bids_[price] += qty;
             if (bids_[price] <= 0)
@@ -145,16 +147,16 @@ private:
 
     uint64_t bid_l1_[L1_SIZE]{0};
     uint64_t bid_l2_[L2_SIZE]{0};
-    int32_t bid_qty_[RingSize]{0};
+    OrderQty bid_qty_[RingSize]{0};
 
     uint64_t ask_l1_[L1_SIZE]{0};
     uint64_t ask_l2_[L2_SIZE]{0};
-    int32_t ask_qty_[RingSize]{0};
+    OrderQty ask_qty_[RingSize]{0};
 
-    inline uint32_t get_idx(int32_t price) const noexcept { return static_cast<uint32_t>(price) & (RingSize - 1); }
+    inline uint32_t get_idx(Price price) const noexcept { return static_cast<uint32_t>(price) & (RingSize - 1); }
 
 public:
-    inline void apply_delta(uint8_t side, int32_t price, int32_t qty) noexcept {
+    inline void apply_delta(uint8_t side, Price price, OrderQty qty) noexcept {
         uint32_t idx = get_idx(price);
         uint32_t l1_idx = idx >> 6;
         uint32_t l2_idx = l1_idx >> 6;
@@ -326,11 +328,11 @@ std::vector<MarketEvent> generate_realistic_market(uint64_t max_events) {
             current_price = 1.0;
 
         // 2. Simulate Order Quantity (incorporating partial fills and cancellations)
-        int32_t qty = qty_dist(gen);
+        OrderQty qty = qty_dist(gen);
         if (qty == 0)
             qty = 1;
 
-        stream[i] = {static_cast<uint8_t>(side_dist(gen)), static_cast<int32_t>(current_price), qty};
+        stream[i] = {static_cast<uint8_t>(side_dist(gen)), static_cast<Price>(current_price), qty};
     }
     return stream;
 }

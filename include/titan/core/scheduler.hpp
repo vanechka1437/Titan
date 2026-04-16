@@ -17,13 +17,13 @@ namespace titan::core {
 // This struct is stored in a stationary Pool Allocator to prevent cache churn.
 // ============================================================================
 struct alignas(32) ActionPayload {
-    uint32_t agent_id;
-    uint8_t action_type;  // 0: Limit Order, 1: Cancel, 2: Market Order
-    uint8_t side;         // 0: Bid, 1: Ask
-    uint8_t _padding[2];  // Explicit padding for 4-byte alignment
-    Price price;
     OrderQty qty;
     OrderId target_id;  // Used for Cancel operations
+    Price price;
+    OwnerId agent_id;
+    uint8_t action_type;  // 0: Limit Order, 1: Cancel, 2: Market Order
+    uint8_t side;         // 0: Bid, 1: Ask
+    uint8_t _padding[8];  // Explicit padding for 4-byte alignment
 };
 
 // ============================================================================
@@ -31,16 +31,16 @@ struct alignas(32) ActionPayload {
 // Size: Exactly 16 bytes.
 // Four nodes fit into a single 64-byte cache line for massive SIMD throughput.
 // ============================================================================
-struct HeapNode {
+struct alignas(16) HeapNode {
     uint64_t arrival_time;  // Primary Min-Heap sorting key
     uint32_t payload_idx;   // Index into the ActionPayload Arena
-    uint32_t _padding;      // Padding to reach 16-byte power-of-two size
+    uint32_t sequence_id;   // Strict FIFO tie-breaker for simultaneous events
 };
 
 // ============================================================================
 // 3. FAST D-ARY HEAP (Templated)
-// O(logD N) Priority Queue.
-// Recommended Arity: 8 for modern CPUs (exploits 128-bit spatial prefetchers).
+// O(logD N) Priority Queue with Stable FIFO Sorting.
+// Recommended Arity: 4 or 8 for modern CPUs.
 // ============================================================================
 template <uint32_t Arity>
 class FastDAryHeap {
@@ -53,6 +53,22 @@ private:
     std::size_t size_{0};
     std::size_t max_capacity_;
 
+    // Monotonically increasing counter to guarantee FIFO determinism
+    uint32_t sequence_counter_{0};
+
+    // --- Strict Deterministic Comparisons ---
+    static inline bool is_better_or_equal(const HeapNode& a, const HeapNode& b) noexcept {
+        if (a.arrival_time != b.arrival_time)
+            return a.arrival_time < b.arrival_time;
+        return a.sequence_id <= b.sequence_id;
+    }
+
+    static inline bool is_strictly_better(const HeapNode& a, const HeapNode& b) noexcept {
+        if (a.arrival_time != b.arrival_time)
+            return a.arrival_time < b.arrival_time;
+        return a.sequence_id < b.sequence_id;
+    }
+
     /**
      * @brief Tournament-style branchless min-search.
      * Compiler unrolls this entirely based on the Arity template parameter.
@@ -60,36 +76,30 @@ private:
     inline std::size_t find_best_child(std::size_t first_child) const noexcept {
         if constexpr (Arity == 8) {
             // Level 1: 4 pairs
-            std::size_t a = (data_[first_child + 0].arrival_time <= data_[first_child + 1].arrival_time)
-                                ? first_child + 0
-                                : first_child + 1;
-            std::size_t b = (data_[first_child + 2].arrival_time <= data_[first_child + 3].arrival_time)
-                                ? first_child + 2
-                                : first_child + 3;
-            std::size_t c = (data_[first_child + 4].arrival_time <= data_[first_child + 5].arrival_time)
-                                ? first_child + 4
-                                : first_child + 5;
-            std::size_t d = (data_[first_child + 6].arrival_time <= data_[first_child + 7].arrival_time)
-                                ? first_child + 6
-                                : first_child + 7;
+            std::size_t a =
+                is_better_or_equal(data_[first_child + 0], data_[first_child + 1]) ? first_child + 0 : first_child + 1;
+            std::size_t b =
+                is_better_or_equal(data_[first_child + 2], data_[first_child + 3]) ? first_child + 2 : first_child + 3;
+            std::size_t c =
+                is_better_or_equal(data_[first_child + 4], data_[first_child + 5]) ? first_child + 4 : first_child + 5;
+            std::size_t d =
+                is_better_or_equal(data_[first_child + 6], data_[first_child + 7]) ? first_child + 6 : first_child + 7;
             // Level 2: 2 pairs
-            std::size_t e = (data_[a].arrival_time <= data_[b].arrival_time) ? a : b;
-            std::size_t f = (data_[c].arrival_time <= data_[d].arrival_time) ? c : d;
+            std::size_t e = is_better_or_equal(data_[a], data_[b]) ? a : b;
+            std::size_t f = is_better_or_equal(data_[c], data_[d]) ? c : d;
             // Level 3: Final winner
-            return (data_[e].arrival_time <= data_[f].arrival_time) ? e : f;
+            return is_better_or_equal(data_[e], data_[f]) ? e : f;
         } else if constexpr (Arity == 4) {
-            std::size_t a = (data_[first_child + 0].arrival_time <= data_[first_child + 1].arrival_time)
-                                ? first_child + 0
-                                : first_child + 1;
-            std::size_t b = (data_[first_child + 2].arrival_time <= data_[first_child + 3].arrival_time)
-                                ? first_child + 2
-                                : first_child + 3;
-            return (data_[a].arrival_time <= data_[b].arrival_time) ? a : b;
+            std::size_t a =
+                is_better_or_equal(data_[first_child + 0], data_[first_child + 1]) ? first_child + 0 : first_child + 1;
+            std::size_t b =
+                is_better_or_equal(data_[first_child + 2], data_[first_child + 3]) ? first_child + 2 : first_child + 3;
+            return is_better_or_equal(data_[a], data_[b]) ? a : b;
         } else {
             // Generic fallback for other arities
             std::size_t best = first_child;
             for (std::size_t i = 1; i < Arity; ++i) {
-                if (data_[first_child + i].arrival_time < data_[best].arrival_time) {
+                if (is_strictly_better(data_[first_child + i], data_[best])) {
                     best = first_child + i;
                 }
             }
@@ -101,7 +111,7 @@ private:
         HeapNode node = data_[idx];
         while (idx > 0) {
             std::size_t parent = (idx - 1) / Arity;
-            if (data_[parent].arrival_time <= node.arrival_time)
+            if (is_better_or_equal(data_[parent], node))
                 break;
             data_[idx] = data_[parent];
             idx = parent;
@@ -111,7 +121,6 @@ private:
 
     inline void sift_down(std::size_t idx) noexcept {
         HeapNode node = data_[idx];
-        const uint64_t target_time = node.arrival_time;
 
         while (true) {
             const std::size_t first_child = Arity * idx + 1;
@@ -121,7 +130,7 @@ private:
             // Tournament-style branchless selection
             std::size_t best = find_best_child(first_child);
 
-            if (target_time <= data_[best].arrival_time)
+            if (is_better_or_equal(node, data_[best]))
                 break;
 
             data_[idx] = data_[best];
@@ -154,21 +163,24 @@ public:
     [[nodiscard]] inline std::size_t size() const noexcept { return size_; }
     [[nodiscard]] inline const HeapNode& top() const noexcept { return data_[0]; }
 
-    inline void push(uint64_t time, uint32_t payload_idx) {
+    // Returns false on overflow (Silent drop for RL sandbox safety) instead of crashing
+    inline bool push(uint64_t time, uint32_t payload_idx) noexcept {
         if (size_ >= max_capacity_) [[unlikely]] {
-            throw std::runtime_error("FastDAryHeap Overflow");
+            return false;
         }
 
         const std::size_t idx = size_++;
-        data_[idx] = {time, payload_idx, 0};
+        // Guarantee strict FIFO via sequence_counter_
+        data_[idx] = {time, payload_idx, sequence_counter_++};
 
         // Maintain Sentinel Zone: ensures sift_down never compares against garbage memory.
-        // The next Arity elements are always set to infinity.
+        // The next Arity elements are always set to infinity (and max sequence).
         for (uint32_t i = 0; i < Arity; ++i) {
-            data_[size_ + i].arrival_time = 0xFFFFFFFFFFFFFFFFULL;
+            data_[size_ + i] = {0xFFFFFFFFFFFFFFFFULL, 0, 0xFFFFFFFF};
         }
 
         sift_up(idx);
+        return true;
     }
 
     inline void pop() noexcept {
@@ -176,7 +188,9 @@ public:
             return;
 
         data_[0] = data_[--size_];
-        data_[size_].arrival_time = 0xFFFFFFFFFFFFFFFFULL;
+
+        // Ensure the vacated spot becomes a perfect sentinel
+        data_[size_] = {0xFFFFFFFFFFFFFFFFULL, 0, 0xFFFFFFFF};
 
         if (size_ > 0) {
             sift_down(0);
@@ -185,9 +199,11 @@ public:
 
     inline void clear() noexcept {
         size_ = 0;
+        sequence_counter_ = 0;  // Reset monotonic ID for the next RL episode
+
         // Initialize the first two cache lines of sentinels
         for (uint32_t i = 0; i < Arity * 2; ++i) {
-            data_[i].arrival_time = 0xFFFFFFFFFFFFFFFFULL;
+            data_[i] = {0xFFFFFFFFFFFFFFFFULL, 0, 0xFFFFFFFF};
         }
     }
 };

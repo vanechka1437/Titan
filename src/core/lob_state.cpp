@@ -1,5 +1,7 @@
 #include "titan/core/lob_state.hpp"
 
+#include "titan/core/types.hpp"
+
 namespace titan::core {
 
 // ============================================================================
@@ -7,7 +9,7 @@ namespace titan::core {
 // ============================================================================
 
 template <uint32_t RingSize>
-Handle LOBState<RingSize>::add_order(OrderId id, uint16_t owner_id, Price price, OrderQty qty, uint8_t side,
+Handle LOBState<RingSize>::add_order(OrderId id, OwnerId owner_id, Price price, OrderQty qty, uint8_t side,
                                      OrderPoolAllocator& pool) {
     // 1. Secure O(1) allocation from the LIFO free list (preserves ABA protection tags)
     const Handle h = pool.allocate();
@@ -524,10 +526,6 @@ void LOBState<RingSize>::shift_window_to_center(Price target_price) noexcept {
             ++last;  // Advance iterator without erasing to prevent quadratic shifting
         }
 
-        // Phase 2: CRITICAL O(N) ERASE
-        // boost::container::flat_map uses a contiguous array. Erasing elements one-by-one
-        // inside the loop causes catastrophic O(N^2) memory shifting overhead.
-        // Range erase guarantees a single, highly-optimized block shift.
         if (first != last) {
             cold_map.erase(first, last);
         }

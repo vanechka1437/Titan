@@ -24,7 +24,7 @@ void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8
 
     // 4. Generate a LOB_UPDATE so all agents' shadow order books reflect
     // the decreased liquidity at this specific price level
-    out_events.push_update(maker.side, maker.price, -(static_cast<int32_t>(trade_qty)));
+    out_events.push_update(maker.side, maker.price, -(static_cast<int64_t>(trade_qty)));
 }
 
 // ============================================================================
@@ -69,7 +69,7 @@ void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t
             // If the aggressive order matches against a passive order from the same agent,
             // we cancel the passive maker order to prevent artificial volume generation (wash trading).
             if (maker.owner_id == owner_id) [[unlikely]] {
-                out_events.push_update(maker.side, maker.price, -(static_cast<int32_t>(maker.quantity)));
+                out_events.push_update(maker.side, maker.price, -(static_cast<int64_t>(maker.quantity)));
                 order_map_[maker.id] = NULL_HANDLE;
                 lob_.remove_order(maker_handle, pool_);
                 pool_.free(maker_handle);
@@ -108,7 +108,7 @@ void MatchingEngine::process_order(uint64_t order_id, uint16_t owner_id, uint8_t
 
             // 2. SELF-TRADE PREVENTION (STP) - Cancel Resting Policy
             if (maker.owner_id == owner_id) [[unlikely]] {
-                out_events.push_update(maker.side, maker.price, -(static_cast<int32_t>(maker.quantity)));
+                out_events.push_update(maker.side, maker.price, -(static_cast<int64_t>(maker.quantity)));
                 order_map_[maker.id] = NULL_HANDLE;
                 lob_.remove_order(maker_handle, pool_);
                 pool_.free(maker_handle);
@@ -179,7 +179,7 @@ void MatchingEngine::process_cancel(uint64_t target_order_id, uint16_t requestin
     pool_.free(h);
 
     // 4. Generate an event for Shadow LOBs (so agents see the liquidity removal)
-    out_events.push_update(side, p, -(static_cast<int32_t>(q)));
+    out_events.push_update(side, p, -(static_cast<int64_t>(q)));
 }
 
 // ============================================================================

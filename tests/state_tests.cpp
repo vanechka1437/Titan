@@ -14,7 +14,7 @@ struct MockEvent {
     uint64_t timestamp;
     uint8_t action_type;
     uint32_t price;
-    int32_t qty;
+    int64_t qty;
 };
 
 // ============================================================================

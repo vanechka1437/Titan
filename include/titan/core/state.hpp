@@ -67,7 +67,7 @@ class OpenAddressHashMap {
 public:
     struct Entry {
         Price price;
-        int32_t qty;
+        OrderQty qty;
     };
 
 private:
@@ -102,7 +102,7 @@ private:
 public:
     OpenAddressHashMap() { table_.assign(4096, {EMPTY, 0}); }
 
-    inline void add(Price p, int32_t qty_delta) noexcept {
+    inline void add(Price p, OrderQty qty_delta) noexcept {
         if (count_ * 2 >= table_.size())
             rehash();
 
@@ -136,13 +136,13 @@ public:
     }
 
     // O(1) Absolute Extraction: Finds a price, returns its volume, and wipes it.
-    inline int32_t extract(Price p) noexcept {
+    inline OrderQty extract(Price p) noexcept {
         if (size_ == 0)
             return 0;
         uint32_t idx = hash(p);
         while (table_[idx].price != EMPTY) {
             if (table_[idx].price == p) {
-                int32_t q = table_[idx].qty;
+                OrderQty q = table_[idx].qty;
                 table_[idx].price = TOMBSTONE;
                 size_--;
                 return q;
@@ -204,11 +204,11 @@ private:
     // --- Hot Zone (L1/L2 Cache Resident) ---
     uint64_t bid_l1_[L1_SIZE]{0};
     uint64_t bid_l2_[L2_SIZE]{0};
-    int32_t bid_qty_[WindowSize]{0};
+    OrderQty bid_qty_[WindowSize]{0};
 
     uint64_t ask_l1_[L1_SIZE]{0};
     uint64_t ask_l2_[L2_SIZE]{0};
-    int32_t ask_qty_[WindowSize]{0};
+    OrderQty ask_qty_[WindowSize]{0};
 
     Price anchor_price_{UNINITIALIZED_ANCHOR};
 
@@ -255,20 +255,20 @@ private:
             for (Price p = anchor_price_; p < new_anchor; ++p) {
                 evict_idx(p - anchor_price_, p);
             }
-            std::memmove(bid_qty_, bid_qty_ + offset, (WindowSize - offset) * sizeof(int32_t));
-            std::memmove(ask_qty_, ask_qty_ + offset, (WindowSize - offset) * sizeof(int32_t));
-            std::memset(bid_qty_ + (WindowSize - offset), 0, offset * sizeof(int32_t));
-            std::memset(ask_qty_ + (WindowSize - offset), 0, offset * sizeof(int32_t));
+            std::memmove(bid_qty_, bid_qty_ + offset, (WindowSize - offset) * sizeof(int64_t));
+            std::memmove(ask_qty_, ask_qty_ + offset, (WindowSize - offset) * sizeof(int64_t));
+            std::memset(bid_qty_ + (WindowSize - offset), 0, offset * sizeof(int64_t));
+            std::memset(ask_qty_ + (WindowSize - offset), 0, offset * sizeof(int64_t));
         } else {
             // Shift Right (Bear Market): Evict old top range
             int64_t shift = -offset;
             for (Price p = new_end + 1; p <= old_end; ++p) {
                 evict_idx(p - anchor_price_, p);
             }
-            std::memmove(bid_qty_ + shift, bid_qty_, (WindowSize - shift) * sizeof(int32_t));
-            std::memmove(ask_qty_ + shift, ask_qty_, (WindowSize - shift) * sizeof(int32_t));
-            std::memset(bid_qty_, 0, shift * sizeof(int32_t));
-            std::memset(ask_qty_, 0, shift * sizeof(int32_t));
+            std::memmove(bid_qty_ + shift, bid_qty_, (WindowSize - shift) * sizeof(int64_t));
+            std::memmove(ask_qty_ + shift, ask_qty_, (WindowSize - shift) * sizeof(int64_t));
+            std::memset(bid_qty_, 0, shift * sizeof(int64_t));
+            std::memset(ask_qty_, 0, shift * sizeof(int64_t));
         }
 
         anchor_price_ = new_anchor;
@@ -277,11 +277,11 @@ private:
         // O(Delta) complexity. Never scans the full hash map!
         auto absorb_range = [&](Price start_p, Price end_p) {
             for (Price p = start_p; p <= end_p; ++p) {
-                int32_t b_qty = cold_bids_.extract(p);
+                OrderQty b_qty = cold_bids_.extract(p);
                 if (b_qty > 0)
                     bid_qty_[p - anchor_price_] = b_qty;
 
-                int32_t a_qty = cold_asks_.extract(p);
+                OrderQty a_qty = cold_asks_.extract(p);
                 if (a_qty > 0)
                     ask_qty_[p - anchor_price_] = a_qty;
             }
@@ -335,10 +335,14 @@ public:
     // WRITE PATH (Hot Path driven by the Engine Event Dispatcher)
     // Optimized with Unsigned Integer Underflow bounds checking.
     // ========================================================================
-    inline void apply_delta(uint8_t side, Price price, int32_t qty_delta) noexcept {
+    inline void apply_delta(uint8_t side, Price price, int64_t qty_delta) noexcept {
+        if (anchor_price_ == UNINITIALIZED_ANCHOR) [[unlikely]] {
+            recenter(price);
+        }
+
         // HFT Trick: Unsigned integer underflow bounds checking.
-        // If price < anchor_price_, idx becomes a huge number (e.g. 0xFFFFFF...),
-        // cleanly failing the idx < WindowSize check in exactly ONE CPU instruction.
+        // If price is below anchor_price_, idx wraps around to 0xFFFFFF...
+        // cleanly failing the idx < WindowSize check in ONE CPU instruction.
         uint32_t idx = price - anchor_price_;
 
         if (idx < WindowSize) [[likely]] {
@@ -371,11 +375,6 @@ public:
             }
         } else {
             // --- COLD ZONE OR RECENTER PATH (Unlikely path) ---
-            if (anchor_price_ == UNINITIALIZED_ANCHOR) {
-                recenter(price);
-                apply_delta(side, price, qty_delta);  // Re-enter
-                return;
-            }
 
             // Check if aggressive enough to trigger a window shift
             if ((side == 0 && price >= anchor_price_ + WindowSize) || (side == 1 && price < anchor_price_)) {
@@ -391,7 +390,6 @@ public:
                 cold_asks_.add(price, qty_delta);
         }
     }
-
     // ========================================================================
     // READ PATH (Synchronous Barrier Export to PyTorch)
     // Pure O(Depth) hardware bitscan. Sorting is mathematically bypassed.
@@ -514,7 +512,7 @@ public:
 template <uint32_t ObsDepth = 20>
 class AgentState {
 public:
-    uint32_t id{0};
+    OwnerId id{0};
 
     // --- Network Physics Parameters ---
     uint64_t ingress_delay{0};     // Latency: Agent -> Exchange
@@ -534,11 +532,11 @@ public:
 
     // --- Precise Accounting ---
     int64_t real_cash{0};
-    int32_t real_inventory{0};
+    int64_t real_inventory{0};
 
     explicit AgentState() = default;
 
-    inline void update_balance(int64_t cash_delta, int32_t inventory_delta) noexcept {
+    inline void update_balance(int64_t cash_delta, int64_t inventory_delta) noexcept {
         real_cash += cash_delta;
         real_inventory += inventory_delta;
 
