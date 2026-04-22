@@ -9,18 +9,21 @@ namespace titan::core {
 // ============================================================================
 
 template <uint32_t RingSize>
-Handle LOBState<RingSize>::add_order(OrderId id, OwnerId owner_id, Price price, OrderQty qty, uint8_t side,
-                                     OrderPoolAllocator& pool) {
+OrderId LOBState<RingSize>::add_order(OwnerId owner_id, Price price, OrderQty qty, uint8_t side,
+                                      OrderPoolAllocator& pool) {
     // 1. Secure O(1) allocation from the LIFO free list (preserves ABA protection tags)
     const Handle h = pool.allocate();
     if (h == NULL_HANDLE) [[unlikely]] {
-        return NULL_HANDLE;  // Pool capacity exhausted
+        return 0;  // Pool capacity exhausted
     }
 
     OrderNode& node = pool.get_node(h);
 
-    // 2. Initialize the payload. Next pointer must be strictly nullified as it's a tail insertion.
-    node.id = id;
+    // 2. FORGE THE SMART ID (Generation + Handle)
+    const OrderId smart_id = pack_order_id(node.generation, h);
+
+    // 3. Initialize the payload. Next pointer must be strictly nullified as it's a tail insertion.
+    node.id = smart_id;
     node.owner_id = owner_id;
     node.price = price;
     node.quantity = qty;
@@ -73,8 +76,8 @@ Handle LOBState<RingSize>::add_order(OrderId id, OwnerId owner_id, Price price, 
         level.total_qty += qty;
     }
 
-    // Return the memory handle back to the MatchingEngine for O(1) mapping
-    return h;
+    // Return the Smart OrderId back to the MatchingEngine
+    return smart_id;
 }
 
 template <uint32_t RingSize>

@@ -156,8 +156,8 @@ public:
 
     // --- Public API ---
 
-    // Core insertion. Returns the Handle for O(1) mapping in the MatchingEngine.
-    Handle add_order(OrderId id, OwnerId owner_id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool);
+    // Core insertion. Returns the Smart OrderId (Generation + Handle).
+    OrderId add_order(OwnerId owner_id, Price price, OrderQty qty, uint8_t side, OrderPoolAllocator& pool);
 
     // O(1) extraction of an order using its memory handle.
     void remove_order(Handle h, OrderPoolAllocator& pool) noexcept;
