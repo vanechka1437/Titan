@@ -506,8 +506,9 @@ public:
 };
 
 // ============================================================================
-// 2. AGENT STATE
+// 1. AGENT STATE
 // Represents an isolated actor within the market environment.
+// Stripped down to essential physics parameters and zero-copy accounting.
 // ============================================================================
 template <uint32_t ObsDepth = 20>
 class AgentState {
@@ -520,93 +521,200 @@ public:
     uint64_t compute_delay{0};     // Agent's inference/decision latency
     uint64_t next_wakeup_time{0};  // Absolute engine epoch for next allowed action
 
-    // --- Local World View ---
-    ShadowLOB<ObsDepth> shadow_lob;
-
-    // --- Zero-Copy Arena Pointers ---
-    // Direct memory mapping to PyTorch tensors for instantaneous observation reads
-    float* obs_cash_ptr{nullptr};
-    float* obs_inventory_ptr{nullptr};
-    float* obs_pnl_ptr{nullptr};
-    float* obs_event_stream_ptr{nullptr};
-
     // --- Precise Accounting ---
     int64_t real_cash{0};
     int64_t real_inventory{0};
 
     explicit AgentState() = default;
 
-    inline void update_balance(int64_t cash_delta, int64_t inventory_delta) noexcept {
-        real_cash += cash_delta;
-        real_inventory += inventory_delta;
-
-        if (obs_cash_ptr)
-            *obs_cash_ptr = static_cast<float>(real_cash);
-        if (obs_inventory_ptr)
-            *obs_inventory_ptr = static_cast<float>(real_inventory);
-    }
-
-    // ========================================================================
-    // Event Stream Zero-Copy Materialization
-    // Copies centralized environment events into the agent's tensor slice.
-    // Fills remaining buffer space with zero-padding to maintain matrix shape.
-    // ========================================================================
-    template <typename EventBuffer>
-    inline void export_events_to_tensor(const EventBuffer& event_buffer, uint32_t max_events) const noexcept {
-        if (!obs_event_stream_ptr)
-            return;
-
-        uint32_t buffer_size = static_cast<uint32_t>(event_buffer.size());
-        uint32_t count = std::min(buffer_size, max_events);
-        uint32_t offset = 0;
-
-        uint32_t start_idx = (buffer_size > max_events) ? (buffer_size - max_events) : 0;
-
-        for (uint32_t i = 0; i < count; ++i) {
-            const auto& ev = event_buffer[start_idx + i];
-            obs_event_stream_ptr[offset++] = static_cast<float>(ev.type);  // TRADE(0) или LOB_UPDATE(1)
-            obs_event_stream_ptr[offset++] = static_cast<float>(ev.side);  // 0 (Bid) или 1 (Ask)
-            obs_event_stream_ptr[offset++] = static_cast<float>(ev.price);
-            obs_event_stream_ptr[offset++] = static_cast<float>(ev.qty_delta);
-        }
-
-        uint32_t remaining_floats = (max_events - count) * 4;
-        if (remaining_floats > 0) {
-            std::memset(obs_event_stream_ptr + offset, 0, remaining_floats * sizeof(float));
-        }
-    }
-
     inline void reset() noexcept {
         next_wakeup_time = 0;
         real_cash = 0;
         real_inventory = 0;
-        shadow_lob.clear();
     }
 };
 
 // ============================================================================
-// 3. ENVIRONMENT STATE
+// 2. ENVIRONMENT STATE
 // The global simulation sandbox tracking physics and causality.
+// Acts as the Zero-Copy Writer to the UnifiedMemoryArena.
 // ============================================================================
 template <uint32_t ObsDepth = 20>
 class EnvironmentState {
+private:
+    uint32_t env_id_;
+    uint32_t num_agents_;
+    uint32_t max_events_per_step_;
+    uint32_t max_orders_per_agent_;
+    uint32_t current_event_count_{0};
+
+    UnifiedMemoryArena* arena_;
+
 public:
-    uint32_t env_id;
-
     uint64_t current_time{0};  // Shared environment nanosecond clock
-
     std::vector<AgentState<ObsDepth>> agents;
 
-    // Centralized event buffer allocated safely in heap to prevent stack overflow
-    DefaultEventBuffer event_buffer;
+    explicit EnvironmentState(uint32_t env_id, uint32_t num_agents, 
+                              uint32_t max_events_per_step, uint32_t max_orders_per_agent,
+                              UnifiedMemoryArena* arena)
+        : env_id_(env_id), num_agents_(num_agents), 
+          max_events_per_step_(max_events_per_step), 
+          max_orders_per_agent_(max_orders_per_agent), 
+          arena_(arena) {
+          
+        agents.resize(num_agents);
+        for (uint32_t i = 0; i < num_agents; ++i) {
+            agents[i].id = static_cast<OwnerId>(i);
+        }
+    }
 
-    MatchingEngine* engine = nullptr;
+    inline void prepare_for_step() noexcept {
+        current_event_count_ = 0;
+        
+        // Zero out the events buffer for this step to prevent stale data
+        const std::size_t offset = env_id_ * max_events_per_step_;
+        std::memset(arena_->events_ptr() + offset, 0, max_events_per_step_ * sizeof(MarketDataEvent));
+    }
 
     inline void reset() noexcept {
         current_time = 0;
-        event_buffer.clear();
+        current_event_count_ = 0;
         for (auto& agent : agents) {
             agent.reset();
+        }
+    }
+
+    // ========================================================================
+    // ZERO-COPY EVENT WRITERS
+    // ========================================================================
+
+    inline void record_trade(Price price, OrderQty qty, OwnerId maker, OwnerId taker, uint8_t side) noexcept {
+        // Update Maker balances
+        agents[maker].real_cash += (side == 0) ? -(static_cast<int64_t>(price) * qty) : (static_cast<int64_t>(price) * qty);
+        agents[maker].real_inventory += (side == 0) ? qty : -qty;
+        
+        // Update Taker balances
+        agents[taker].real_cash += (side == 0) ? (static_cast<int64_t>(price) * qty) : -(static_cast<int64_t>(price) * qty);
+        agents[taker].real_inventory += (side == 0) ? -qty : qty;
+
+        // Push directly to Zero-Copy Tensor memory
+        arena_->cash_ptr()[(env_id_ * num_agents_) + maker] = static_cast<float>(agents[maker].real_cash);
+        arena_->inventory_ptr()[(env_id_ * num_agents_) + maker] = static_cast<float>(agents[maker].real_inventory);
+        
+        arena_->cash_ptr()[(env_id_ * num_agents_) + taker] = static_cast<float>(agents[taker].real_cash);
+        arena_->inventory_ptr()[(env_id_ * num_agents_) + taker] = static_cast<float>(agents[taker].real_inventory);
+
+        // Record the event
+        if (current_event_count_ < max_events_per_step_) {
+            const std::size_t offset = (env_id_ * max_events_per_step_) + current_event_count_;
+            MarketDataEvent& event = arena_->events_ptr()[offset];
+            
+            event.qty_delta = -qty; 
+            event.cash_delta = static_cast<int64_t>(price) * qty;
+            event.price = price;
+            event.owner_id = maker; 
+            event.type = MarketDataEvent::Type::TRADE;
+            event.side = side;
+            event.order_id = 0; 
+            
+            current_event_count_++;
+        }
+    }
+
+    inline void record_cancel(Price price, OrderQty qty, OwnerId owner_id, uint8_t side, OrderId smart_id) noexcept {
+        if (current_event_count_ < max_events_per_step_) {
+            const std::size_t offset = (env_id_ * max_events_per_step_) + current_event_count_;
+            MarketDataEvent& event = arena_->events_ptr()[offset];
+            
+            event.qty_delta = -qty;
+            event.cash_delta = 0;
+            event.price = price;
+            event.owner_id = owner_id;
+            event.type = MarketDataEvent::Type::CANCEL;
+            event.side = side;
+            event.order_id = smart_id;
+            
+            current_event_count_++;
+        }
+    }
+
+    inline void record_accepted(Price price, OrderQty qty, OwnerId owner_id, uint8_t side, OrderId smart_id) noexcept {
+        if (current_event_count_ < max_events_per_step_) {
+            const std::size_t offset = (env_id_ * max_events_per_step_) + current_event_count_;
+            MarketDataEvent& event = arena_->events_ptr()[offset];
+            
+            event.qty_delta = qty;
+            event.cash_delta = 0;
+            event.price = price;
+            event.owner_id = owner_id;
+            event.type = MarketDataEvent::Type::ACCEPTED;
+            event.side = side;
+            event.order_id = smart_id;
+            
+            current_event_count_++;
+        }
+    }
+
+    // ========================================================================
+    // ZERO-COPY ACTIVE ORDER TRACKING
+    // ========================================================================
+
+    inline void add_active_order(OwnerId agent_id, OrderId smart_id, OrderQty qty) noexcept {
+        const std::size_t base_offset = (env_id_ * num_agents_ * max_orders_per_agent_) + (agent_id * max_orders_per_agent_);
+        ActiveOrderRecord* records = arena_->active_orders_ptr() + base_offset;
+        
+        for (uint32_t i = 0; i < max_orders_per_agent_; ++i) {
+            if (records[i].id == 0) {
+                records[i].id = smart_id;
+                records[i].quantity = qty;
+                return;
+            }
+        }
+    }
+
+    inline void update_active_order_qty(OwnerId agent_id, OrderId smart_id, OrderQty new_qty) noexcept {
+        const std::size_t base_offset = (env_id_ * num_agents_ * max_orders_per_agent_) + (agent_id * max_orders_per_agent_);
+        ActiveOrderRecord* records = arena_->active_orders_ptr() + base_offset;
+        
+        for (uint32_t i = 0; i < max_orders_per_agent_; ++i) {
+            if (records[i].id == smart_id) {
+                records[i].quantity = new_qty;
+                return;
+            }
+        }
+    }
+
+    inline void clear_active_order(OwnerId agent_id, OrderId smart_id) noexcept {
+        const std::size_t base_offset = (env_id_ * num_agents_ * max_orders_per_agent_) + (agent_id * max_orders_per_agent_);
+        ActiveOrderRecord* records = arena_->active_orders_ptr() + base_offset;
+        
+        for (uint32_t i = 0; i < max_orders_per_agent_; ++i) {
+            if (records[i].id == smart_id) {
+                records[i].id = 0;
+                records[i].quantity = 0;
+                return;
+            }
+        }
+    }
+
+    // ========================================================================
+    // ZERO-COPY LOB OBSERVATION EXPORT
+    // ========================================================================
+    
+    inline void update_observations(const OptimalLOBState& lob) noexcept {
+        const std::size_t offset = env_id_ * ObsDepth * 4; 
+        float* lob_tensor = arena_->lob_ptr() + offset;
+        
+        std::memset(lob_tensor, 0, ObsDepth * 4 * sizeof(float));
+        
+        Price best_bid = lob.get_best_bid();
+        if (best_bid > 0) {
+            lob_tensor[0] = static_cast<float>(best_bid);
+        }
+
+        Price best_ask = lob.get_best_ask();
+        if (best_ask != 0 && best_ask != UINT32_MAX) {
+            lob_tensor[ObsDepth * 2] = static_cast<float>(best_ask);
         }
     }
 };
