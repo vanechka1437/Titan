@@ -1,9 +1,8 @@
 #pragma once
 
-#include <immintrin.h>  // Required for _mm_malloc
-
 #include <algorithm>
 #include <cstdint>
+#include <new>
 #include <stdexcept>
 #include <vector>
 
@@ -18,13 +17,15 @@ namespace titan::core {
 // ============================================================================
 struct alignas(32) ActionPayload {
     OrderQty qty;
-    OrderId target_id;  // Used for Cancel operations
+    OrderId target_id;    // Used for Cancel operations (Smart ID)
     Price price;
+    uint32_t env_id;      // For multi-environment RL scenarios
     OwnerId agent_id;
     uint8_t action_type;  // 0: Limit Order, 1: Cancel, 2: Market Order
     uint8_t side;         // 0: Bid, 1: Ask
-    uint8_t _padding[8];  // Explicit padding for 4-byte alignment
+    uint8_t _padding[4];  // Explicit padding for strict 32-byte alignment
 };
+static_assert(sizeof(ActionPayload) == 32, "ActionPayload must be exactly 32 bytes");
 
 // ============================================================================
 // 2. THE ROUTING KEY (Metadata)
@@ -36,6 +37,7 @@ struct alignas(16) HeapNode {
     uint32_t payload_idx;   // Index into the ActionPayload Arena
     uint32_t sequence_id;   // Strict FIFO tie-breaker for simultaneous events
 };
+static_assert(sizeof(HeapNode) == 16, "HeapNode must be exactly 16 bytes");
 
 // ============================================================================
 // 3. FAST D-ARY HEAP (Templated)
@@ -49,7 +51,7 @@ class FastDAryHeap {
 
 private:
     // Aligned to 64 bytes to prevent "Cache Line Splits" during child scans
-    alignas(64) HeapNode* data_;
+    alignas(64) HeapNode* data_{nullptr};
     std::size_t size_{0};
     std::size_t max_capacity_;
 
@@ -142,17 +144,21 @@ private:
 public:
     explicit FastDAryHeap(std::size_t max_capacity) : max_capacity_(max_capacity) {
         // Allocate space + Arity-sized buffer for Sentinels (prevents bounds checks)
-        std::size_t alloc_size = max_capacity_ + Arity;
-        data_ = static_cast<HeapNode*>(_mm_malloc(alloc_size * sizeof(HeapNode), 64));
+        const std::size_t alloc_size = max_capacity_ + Arity;
+        
+        // Use standard C++17 aligned allocation for cross-platform compatibility (x86/ARM/Apple Silicon)
+        data_ = static_cast<HeapNode*>(::operator new[](alloc_size * sizeof(HeapNode), std::align_val_t{64}));
 
         if (!data_)
             throw std::bad_alloc();
+            
         clear();
     }
 
     ~FastDAryHeap() {
-        if (data_)
-            _mm_free(data_);
+        if (data_) {
+            ::operator delete[](data_, std::align_val_t{64});
+        }
     }
 
     // Standard HFT practice: Non-copyable to ensure strict ownership of the arena
