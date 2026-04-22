@@ -4,14 +4,14 @@
 #include <immintrin.h>
 #endif
 
-#include <atomic>
-#include <boost/align/aligned_allocator.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
 #include "titan/core/types.hpp"
+#include "titan/core/scheduler.hpp"
+#include "titan/core/matching_engine.hpp"
 
 namespace titan::core {
 
@@ -79,85 +79,94 @@ public:
 
     inline void free(Handle handle) noexcept {
         // Prefetch the node data to L1 cache.
-        // Helps if we need to access this node's generation immediately after.
         _mm_prefetch(reinterpret_cast<const char*>(&nodes_[handle]), _MM_HINT_T0);
 
         free_list_[head_++] = handle;
     }
 
     [[nodiscard]] inline OrderNode& get_node(Handle handle) noexcept { return nodes_[handle]; }
-
     [[nodiscard]] inline const OrderNode& get_node(Handle handle) const noexcept { return nodes_[handle]; }
-
     [[nodiscard]] inline std::size_t size() const noexcept { return head_; }
 };
 
 // ========================================================================
 // UnifiedMemoryArena
 // Master owner of all simulation memory allocations.
-// Combines LOB Memory Pools and Zero-Copy Python/C++ Shared Tensors.
+// Allocates OS-level Pinned Memory (DMA-ready) for Zero-Copy Tensors.
 // ========================================================================
 class UnifiedMemoryArena {
 private:
-    // Config
+    // --- Limits & Config ---
     uint32_t num_envs_;
-    uint32_t max_orders_per_env_;
     uint32_t num_agents_;
-    uint32_t obs_dim_;
-    uint32_t action_dim_;
+    uint32_t max_orders_per_env_;
+    uint32_t max_actions_per_step_;
+    uint32_t max_events_per_step_;
+    uint32_t max_orders_per_agent_;
+    uint32_t obs_depth_;
 
-    // LOB Memory
-    std::vector<OrderNode, boost::alignment::aligned_allocator<OrderNode, 32>> raw_nodes_;
-    std::vector<Handle> raw_free_lists_;
+    // --- Master Pinned Memory Block ---
+    void* pinned_block_{nullptr};
+    std::size_t total_pinned_bytes_{0};
+    std::size_t bridge_tensors_offset_{0};
+
+    // --- C++ Internal LOB Memory (Mapped into pinned_block_) ---
+    OrderNode* raw_nodes_{nullptr};
+    Handle* raw_free_lists_{nullptr};
     std::vector<OrderPoolAllocator> pools_;
+    
+    // --- Zero-Copy Tensors (Mapped into pinned_block_) ---
+    // 1. Input Command Stream
+    ActionPayload* actions_ptr_{nullptr};
+    
+    // 2. Output Event Stream
+    MarketDataEvent* events_ptr_{nullptr};
+    
+    // 3. Agent State Tracking
+    ActiveOrderRecord* active_orders_ptr_{nullptr};
+    
+    // 4. Observations
+    float* lob_ptr_{nullptr};
+    float* cash_ptr_{nullptr};
+    float* inventory_ptr_{nullptr};
+
     LinearAllocator linear_allocator_;
 
-    // Python/C++ Bridge Memory (Zero-Copy Tensors)
-    std::vector<float> observation_tensor_;
-    std::vector<float> action_tensor_;
-    std::vector<int8_t> ready_mask_;
-
-    // Spinlock for execution control
-    // 0 = C++ holds execution, 1 = Python holds execution
-    alignas(64) std::atomic<int> state_{0};
-
 public:
-    UnifiedMemoryArena(uint32_t num_envs, uint32_t max_orders_per_env, std::size_t linear_bytes, uint32_t num_agents,
-                       uint32_t obs_dim, uint32_t action_dim);
+    UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents, 
+                       uint32_t max_orders_per_env, uint32_t max_actions_per_step, 
+                       uint32_t max_events_per_step, uint32_t max_orders_per_agent, 
+                       uint32_t obs_depth, std::size_t linear_bytes);
+                       
+    ~UnifiedMemoryArena();
 
     UnifiedMemoryArena(const UnifiedMemoryArena&) = delete;
     UnifiedMemoryArena& operator=(const UnifiedMemoryArena&) = delete;
 
-    // --- LOB Interfaces ---
+    // --- C++ Internal Interfaces ---
     [[nodiscard]] inline OrderPoolAllocator& get_pool(uint32_t env_id) noexcept { return pools_[env_id]; }
     [[nodiscard]] inline LinearAllocator& get_linear_allocator() noexcept { return linear_allocator_; }
 
+    // --- Config Accessors ---
     [[nodiscard]] inline uint32_t num_envs() const noexcept { return num_envs_; }
-    [[nodiscard]] inline uint32_t max_orders() const noexcept { return max_orders_per_env_; }
-
-    // --- Bridge Interfaces (Python <-> C++) ---
     [[nodiscard]] inline uint32_t num_agents() const noexcept { return num_agents_; }
-    [[nodiscard]] inline uint32_t obs_dim() const noexcept { return obs_dim_; }
-    [[nodiscard]] inline uint32_t action_dim() const noexcept { return action_dim_; }
+    [[nodiscard]] inline uint32_t max_actions_per_step() const noexcept { return max_actions_per_step_; }
+    [[nodiscard]] inline uint32_t max_events_per_step() const noexcept { return max_events_per_step_; }
+    [[nodiscard]] inline uint32_t max_orders_per_agent() const noexcept { return max_orders_per_agent_; }
+    [[nodiscard]] inline uint32_t obs_depth() const noexcept { return obs_depth_; }
 
-    [[nodiscard]] inline float* obs_ptr() noexcept { return observation_tensor_.data(); }
-    [[nodiscard]] inline float* action_ptr() noexcept { return action_tensor_.data(); }
-    [[nodiscard]] inline int8_t* mask_ptr() noexcept { return ready_mask_.data(); }
+    // --- Zero-Copy Tensor Pointers (For DLPack / Nanobind) ---
+    [[nodiscard]] inline ActionPayload* actions_ptr() noexcept { return actions_ptr_; }
+    [[nodiscard]] inline MarketDataEvent* events_ptr() noexcept { return events_ptr_; }
+    [[nodiscard]] inline ActiveOrderRecord* active_orders_ptr() noexcept { return active_orders_ptr_; }
+    
+    [[nodiscard]] inline float* lob_ptr() noexcept { return lob_ptr_; }
+    [[nodiscard]] inline float* cash_ptr() noexcept { return cash_ptr_; }
+    [[nodiscard]] inline float* inventory_ptr() noexcept { return inventory_ptr_; }
 
-    // --- Synchronization ---
-    inline void release_to_python() noexcept { state_.store(1, std::memory_order_release); }
-
-    inline void wait_for_python() noexcept {
-        while (state_.load(std::memory_order_acquire) != 0) {
-#if defined(__x86_64__) || defined(_M_X64)
-            _mm_pause();  // Prevent pipeline flushes and save L1 cache
-#endif
-        }
-    }
-
-    inline void release_to_cpp() noexcept { state_.store(0, std::memory_order_release); }
-
-    void reset() noexcept;
+    // --- Resets ---
+    void reset(const std::vector<uint32_t>& env_indices) noexcept;
+    void reset_all() noexcept;
 };
 
 }  // namespace titan::core

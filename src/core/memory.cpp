@@ -1,8 +1,65 @@
 #include "titan/core/memory.hpp"
 
 #include <cstring>
+#include <new>
+#include <stdexcept>
+
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 namespace titan::core {
+
+// ============================================================================
+// OS-Level Pinned Memory Helpers
+// ============================================================================
+
+namespace {
+
+[[nodiscard]] inline void* allocate_pinned_memory(std::size_t size) {
+#if defined(_WIN32) || defined(_WIN64)
+    void* ptr = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!ptr) {
+        throw std::bad_alloc();
+    }
+    // Best-effort page locking. May require increasing process working set size.
+    VirtualLock(ptr, size);
+    return ptr;
+#else
+    // MAP_POPULATE pre-faults the memory immediately to prevent page faults later
+    void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, 
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+    if (ptr == MAP_FAILED) {
+        throw std::bad_alloc();
+    }
+    // Lock pages in physical RAM (prevent swap out)
+    if (mlock(ptr, size) != 0) {
+        // We log or ignore depending on strictness. For HFT, failure to lock is 
+        // critical, but we'll proceed for OS environments with strict limits.
+    }
+    return ptr;
+#endif
+}
+
+inline void free_pinned_memory(void* ptr, std::size_t size) noexcept {
+    if (!ptr) return;
+#if defined(_WIN32) || defined(_WIN64)
+    VirtualUnlock(ptr, size);
+    VirtualFree(ptr, 0, MEM_RELEASE);
+#else
+    munlock(ptr, size);
+    munmap(ptr, size);
+#endif
+}
+
+[[nodiscard]] constexpr std::size_t align_up(std::size_t size, std::size_t alignment = 64) noexcept {
+    return (size + alignment - 1) & ~(alignment - 1);
+}
+
+} // namespace
 
 // ============================================================================
 // LinearAllocator
@@ -31,7 +88,7 @@ void OrderPoolAllocator::init(OrderNode* nodes, Handle* free_list, uint32_t capa
         nodes_[i].next = NULL_HANDLE;
         nodes_[i].prev = NULL_HANDLE;
 
-        // Zero out payload fields for strictly deterministic initialization
+        // Zero out payload fields for strict deterministic init
         nodes_[i].owner_id = 0;
         nodes_[i].price = 0;
         nodes_[i].quantity = 0;
@@ -53,81 +110,126 @@ void OrderPoolAllocator::reset() noexcept {
 // UnifiedMemoryArena
 // ============================================================================
 
-constexpr std::size_t PAGE_SIZE = 4096;
-
-UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t max_orders_per_env, std::size_t linear_bytes,
-                                       uint32_t num_agents, uint32_t obs_dim, uint32_t action_dim)
+UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
+                                       uint32_t max_orders_per_env, uint32_t max_actions_per_step,
+                                       uint32_t max_events_per_step, uint32_t max_orders_per_agent,
+                                       uint32_t obs_depth, std::size_t linear_bytes)
     : num_envs_(num_envs),
-      max_orders_per_env_(max_orders_per_env),
       num_agents_(num_agents),
-      obs_dim_(obs_dim),
-      action_dim_(action_dim),
-      raw_nodes_(static_cast<std::size_t>(num_envs) * max_orders_per_env),
-      raw_free_lists_(static_cast<std::size_t>(num_envs) * max_orders_per_env),
+      max_orders_per_env_(max_orders_per_env),
+      max_actions_per_step_(max_actions_per_step),
+      max_events_per_step_(max_events_per_step),
+      max_orders_per_agent_(max_orders_per_agent),
+      obs_depth_(obs_depth),
       pools_(num_envs),
-      linear_allocator_(linear_bytes),
-      observation_tensor_(static_cast<std::size_t>(num_envs) * num_agents * obs_dim, 0.0f),
-      action_tensor_(static_cast<std::size_t>(num_envs) * num_agents * action_dim, 0.0f),
-      ready_mask_(static_cast<std::size_t>(num_envs) * num_agents, 0) {
-    // ========================================================================
-    // MEMORY WARM-UP (PREFAULTING)
-    // ========================================================================
+      linear_allocator_(linear_bytes) {
 
-    // 1. Prefaulting the OrderNode array
-    auto* volatile_nodes = reinterpret_cast<volatile uint8_t*>(raw_nodes_.data());
-    const std::size_t total_nodes_bytes = raw_nodes_.size() * sizeof(OrderNode);
-    for (std::size_t offset = 0; offset < total_nodes_bytes; offset += PAGE_SIZE) {
-        volatile_nodes[offset] = 0;
-    }
+    // 1. Calculate byte sizes for each sector
+    const std::size_t nodes_bytes  = static_cast<std::size_t>(num_envs) * max_orders_per_env * sizeof(OrderNode);
+    const std::size_t handles_bytes = static_cast<std::size_t>(num_envs) * max_orders_per_env * sizeof(Handle);
+    const std::size_t actions_bytes = static_cast<std::size_t>(num_envs) * max_actions_per_step * sizeof(ActionPayload);
+    const std::size_t events_bytes  = static_cast<std::size_t>(num_envs) * max_events_per_step * sizeof(MarketDataEvent);
+    const std::size_t active_orders_bytes = static_cast<std::size_t>(num_envs) * num_agents * max_orders_per_agent * sizeof(ActiveOrderRecord);
+    
+    // LOB: depth * 2 sides (bid/ask) * 2 values (price/qty)
+    const std::size_t lob_bytes = static_cast<std::size_t>(num_envs) * obs_depth * 4 * sizeof(float);
+    const std::size_t cash_bytes = static_cast<std::size_t>(num_envs) * num_agents * sizeof(float);
+    const std::size_t inventory_bytes = static_cast<std::size_t>(num_envs) * num_agents * sizeof(float);
 
-    // 2. Prefaulting the Free List (Handles) array
-    auto* volatile_handles = reinterpret_cast<volatile uint8_t*>(raw_free_lists_.data());
-    const std::size_t total_handles_bytes = raw_free_lists_.size() * sizeof(Handle);
-    for (std::size_t offset = 0; offset < total_handles_bytes; offset += PAGE_SIZE) {
-        volatile_handles[offset] = 0;
-    }
+    // 2. Align offsets to 64 bytes (cache line) to prevent false sharing
+    std::size_t offset = 0;
+    
+    const std::size_t nodes_offset = offset;
+    offset = align_up(offset + nodes_bytes);
 
-    // 3. Prefaulting Bridge Tensors (Zero-Copy Memory)
-    auto* volatile_obs = reinterpret_cast<volatile uint8_t*>(observation_tensor_.data());
-    const std::size_t total_obs_bytes = observation_tensor_.size() * sizeof(float);
-    for (std::size_t offset = 0; offset < total_obs_bytes; offset += PAGE_SIZE) {
-        volatile_obs[offset] = 0;
-    }
+    const std::size_t handles_offset = offset;
+    offset = align_up(offset + handles_bytes);
+    
+    bridge_tensors_offset_ = offset;
+    const std::size_t actions_offset = offset;
+    offset = align_up(offset + actions_bytes);
 
-    auto* volatile_act = reinterpret_cast<volatile uint8_t*>(action_tensor_.data());
-    const std::size_t total_act_bytes = action_tensor_.size() * sizeof(float);
-    for (std::size_t offset = 0; offset < total_act_bytes; offset += PAGE_SIZE) {
-        volatile_act[offset] = 0;
-    }
+    const std::size_t events_offset = offset;
+    offset = align_up(offset + events_bytes);
 
-    auto* volatile_mask = reinterpret_cast<volatile uint8_t*>(ready_mask_.data());
-    const std::size_t total_mask_bytes = ready_mask_.size() * sizeof(int8_t);
-    for (std::size_t offset = 0; offset < total_mask_bytes; offset += PAGE_SIZE) {
-        volatile_mask[offset] = 0;
-    }
+    const std::size_t active_orders_offset = offset;
+    offset = align_up(offset + active_orders_bytes);
 
-    // ========================================================================
-    // POOL INITIALIZATION
-    // ========================================================================
+    const std::size_t lob_offset = offset;
+    offset = align_up(offset + lob_bytes);
 
+    const std::size_t cash_offset = offset;
+    offset = align_up(offset + cash_bytes);
+
+    const std::size_t inventory_offset = offset;
+    offset = align_up(offset + inventory_bytes);
+
+    total_pinned_bytes_ = offset;
+
+    // 3. Allocate Pinned Memory Block
+    pinned_block_ = allocate_pinned_memory(total_pinned_bytes_);
+    
+    // Zero out the entire pinned block deterministically
+    std::memset(pinned_block_, 0, total_pinned_bytes_);
+
+    // 4. Map Pointers to Offsets
+    auto* base_ptr = static_cast<std::byte*>(pinned_block_);
+    
+    raw_nodes_         = reinterpret_cast<OrderNode*>(base_ptr + nodes_offset);
+    raw_free_lists_    = reinterpret_cast<Handle*>(base_ptr + handles_offset);
+    actions_ptr_       = reinterpret_cast<ActionPayload*>(base_ptr + actions_offset);
+    events_ptr_        = reinterpret_cast<MarketDataEvent*>(base_ptr + events_offset);
+    active_orders_ptr_ = reinterpret_cast<ActiveOrderRecord*>(base_ptr + active_orders_offset);
+    lob_ptr_           = reinterpret_cast<float*>(base_ptr + lob_offset);
+    cash_ptr_          = reinterpret_cast<float*>(base_ptr + cash_offset);
+    inventory_ptr_     = reinterpret_cast<float*>(base_ptr + inventory_offset);
+
+    // 5. Initialize Pools
     for (uint32_t env_idx = 0; env_idx < num_envs_; ++env_idx) {
         const std::size_t mem_offset = static_cast<std::size_t>(env_idx) * max_orders_per_env_;
-        pools_[env_idx].init(raw_nodes_.data() + mem_offset, raw_free_lists_.data() + mem_offset, max_orders_per_env_);
+        pools_[env_idx].init(raw_nodes_ + mem_offset, raw_free_lists_ + mem_offset, max_orders_per_env_);
     }
 }
 
-void UnifiedMemoryArena::reset() noexcept {
+UnifiedMemoryArena::~UnifiedMemoryArena() {
+    if (pinned_block_) {
+        free_pinned_memory(pinned_block_, total_pinned_bytes_);
+        pinned_block_ = nullptr;
+    }
+}
+
+void UnifiedMemoryArena::reset(const std::vector<uint32_t>& env_indices) noexcept {
+    // Partial reset for specific environments
+    for (const uint32_t env_idx : env_indices) {
+        pools_[env_idx].reset();
+
+        // Size calculation for single environment slices
+        const std::size_t actions_slice = max_actions_per_step_ * sizeof(ActionPayload);
+        const std::size_t events_slice  = max_events_per_step_ * sizeof(MarketDataEvent);
+        const std::size_t active_orders_slice = num_agents_ * max_orders_per_agent_ * sizeof(ActiveOrderRecord);
+        const std::size_t lob_slice = obs_depth_ * 4 * sizeof(float);
+        const std::size_t cash_slice = num_agents_ * sizeof(float);
+        const std::size_t inventory_slice = num_agents_ * sizeof(float);
+
+        // Zero out specific environment data
+        std::memset(reinterpret_cast<std::byte*>(actions_ptr_) + (env_idx * actions_slice), 0, actions_slice);
+        std::memset(reinterpret_cast<std::byte*>(events_ptr_) + (env_idx * events_slice), 0, events_slice);
+        std::memset(reinterpret_cast<std::byte*>(active_orders_ptr_) + (env_idx * active_orders_slice), 0, active_orders_slice);
+        std::memset(reinterpret_cast<std::byte*>(lob_ptr_) + (env_idx * lob_slice), 0, lob_slice);
+        std::memset(reinterpret_cast<std::byte*>(cash_ptr_) + (env_idx * cash_slice), 0, cash_slice);
+        std::memset(reinterpret_cast<std::byte*>(inventory_ptr_) + (env_idx * inventory_slice), 0, inventory_slice);
+    }
+}
+
+void UnifiedMemoryArena::reset_all() noexcept {
     linear_allocator_.reset();
 
     for (auto& pool : pools_) {
         pool.reset();
     }
 
-    std::memset(observation_tensor_.data(), 0, observation_tensor_.size() * sizeof(float));
-    std::memset(action_tensor_.data(), 0, action_tensor_.size() * sizeof(float));
-    std::memset(ready_mask_.data(), 0, ready_mask_.size() * sizeof(int8_t));
-
-    state_.store(0, std::memory_order_release);
+    const std::size_t zero_size = total_pinned_bytes_ - bridge_tensors_offset_;
+    std::memset(static_cast<std::byte*>(pinned_block_) + bridge_tensors_offset_, 0, zero_size);
 }
 
 }  // namespace titan::core
