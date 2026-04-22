@@ -189,6 +189,7 @@ target_sources(titan_core PRIVATE
     src/core/memory.cpp
     src/core/lob_state.cpp
     src/core/matching_engine.cpp
+    src/core/batch_simulator.cpp
 )
 
 # Inject the detected L3 Cache size directly into the compiler
