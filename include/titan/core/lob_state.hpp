@@ -36,6 +36,7 @@ struct alignas(32) PriceLevel {
     // Total used: 20 bytes. Padding required for 32-byte alignment: 12 bytes.
     uint8_t _padding[12]{0};
 };
+static_assert(sizeof(PriceLevel) == 32, "PriceLevel must be exactly 32 bytes for cache alignment");
 
 // ============================================================================
 // Compile-Time Hardware Optimization (Zero Runtime Overhead)
@@ -69,7 +70,7 @@ private:
 
     static constexpr uint32_t RING_MASK = RingSize - 1;
     static constexpr uint32_t L1_SIZE = RingSize / 64;
-    static constexpr uint32_t L2_SIZE = L1_SIZE / 64;
+    static constexpr uint32_t L2_SIZE = (L1_SIZE + 63) / 64; // Safety padding for small rings
 
     // --- Hot Zone: L2/L3 Cache Resident ---
     PriceLevel hot_levels_[RingSize];
