@@ -269,7 +269,10 @@ public:
             idx = static_cast<uint32_t>(payloads_.size());
             payloads_.push_back(ev);
         }
-        heap_.push(ev.time, idx);
+        
+        if (!heap_.push(ev.time, idx)) [[unlikely]] {
+            free_list_.push_back(idx);
+        }
     }
 
     [[nodiscard]] inline const ScheduledEvent& top() const noexcept {

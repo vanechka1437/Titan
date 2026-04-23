@@ -207,7 +207,11 @@ void BatchSimulator<ObsDepth>::resume_batch() noexcept {
                 const ActionPayload& action = actions[idx];
                 
                 // NO_OP handling
-                if (action.action_type == 3) continue; 
+                if (action.action_type == 3) {
+                    uint64_t next_wakeup = envs_[env_id].current_time + envs_[env_id].agents[agent_id].compute_delay;
+                    schedulers_[env_id].push(ScheduledEvent::agent_wakeup(next_wakeup, agent_id));
+                    continue; 
+                }
 
                 // Inject action into scheduler with Network Ingress Delay
                 uint64_t arrival_time = envs_[env_id].current_time + envs_[env_id].agents[agent_id].ingress_delay;

@@ -106,10 +106,11 @@ inline void LOBState<RingSize>::reduce_level_qty(uint8_t side, Price price, Orde
         auto it = target_map.find(price);
 
         if (it != target_map.end()) {
-            it->second.total_qty -= trade_qty;
+            PriceLevel& level = it->second;
+            level.total_qty -= trade_qty;
 
-            if (it->second.total_qty <= 0) {
-                it->second.total_qty = 0;
+            if (level.total_qty <= 0) {
+                target_map.erase(it);
             }
         }
     }
