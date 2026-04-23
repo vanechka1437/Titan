@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -11,95 +12,99 @@
 #include "titan/core/memory.hpp"
 #include "titan/core/scheduler.hpp"
 #include "titan/core/state.hpp"
-#include "titan/core/types.hpp"
 
 namespace titan::core {
 
 // ============================================================================
-// MULTI-AGENT BATCH SIMULATOR
-// The Orchestrator. Owns the Arena, Thread Pool, and N isolated sandboxes.
-// Pure physical execution engine processing Command Streams.
+// BATCH SIMULATOR (Zero-Copy SMDP Event-Driven Engine)
+// 
+// This is the core orchestrator. It runs 1024+ independent Limit Order Book 
+// environments using a highly optimized C++ Thread Pool. 
+// 
+// Architecture: "Asynchronous DES with Synchronous Yielding"
+// 1. Each environment steps through time strictly from event to event (DES).
+// 2. An environment pauses ONLY when an agent receives new data and its 
+//    compute_delay has elapsed.
+// 3. Paused environments flag themselves in the Zero-Copy `ready_mask`.
+// 4. When `ready_count` >= BATCH_SIZE, the C++ threads notify Python.
+// 5. PyTorch processes the batch, and calls `resume_batch()` to unpause.
 // ============================================================================
 template <uint32_t ObsDepth = 20>
 class BatchSimulator {
 private:
-    // --- Limits & Config ---
+    UnifiedMemoryArena* arena_;
     uint32_t num_envs_;
-    uint32_t num_agents_;
-    uint32_t max_orders_per_env_;
-    uint32_t max_actions_per_step_;
-    uint32_t max_events_per_step_;
-    uint32_t max_orders_per_agent_;
+    uint32_t num_agents_per_env_;
+    uint32_t target_batch_size_;
 
-    // --- Core Memory (The Monolith) ---
-    UnifiedMemoryArena arena_;
-
-    // --- Isolated Sandboxes ---
+    // --- Physics & State ---
     std::vector<EnvironmentState<ObsDepth>> envs_;
     std::vector<MatchingEngine> engines_;
+    std::vector<FastScheduler> schedulers_;
 
-    // --- C++ Thread Pool Infrastructure ---
-    uint32_t num_threads_;
+    // --- Concurrency & Thread Pool ---
     std::vector<std::thread> workers_;
-    std::atomic<bool> terminate_pool_{false};
+    alignas(64) std::atomic<bool> running_{false};
 
-    // Barrier Synchronization primitives for lock-free stepping
-    std::mutex sync_mutex_;
-    std::condition_variable cv_start_work_;
-    std::condition_variable cv_work_done_;
+    // --- SMDP Batching Synchronization ---
+    // Tracks how many environments are currently paused and waiting for Python.
+    alignas(64) std::atomic<uint32_t> ready_count_{0};
     
-    uint32_t pending_tasks_{0};
-    uint32_t completed_tasks_{0};
+    std::mutex batch_mutex_;
+    std::condition_variable batch_cv_;
 
-    // --- Execution State ---
-    uint32_t current_num_commands_{0};
+    // --- Environment Control Flags ---
+    // True = Paused (Waiting for RL inference). False = Running DES physics.
+    // Kept separate from arena's ready_mask to avoid atomic overhead on Python memory.
+    std::vector<std::atomic<bool>> env_paused_;
 
-    // --- Internal Worker Function ---
+    // --- Thread Partitioning ---
+    struct alignas(64) WorkerBounds {
+        uint32_t start_env;
+        uint32_t end_env;
+    };
+    std::vector<WorkerBounds> worker_bounds_;
+
+    // Internal loop executed by each background thread
     void worker_loop(uint32_t thread_id);
 
 public:
-    // Initializes the cluster, allocates Pinned Arena once, spins up Threads.
-    BatchSimulator(uint32_t num_envs, uint32_t num_agents, 
-                   uint32_t max_orders_per_env, uint32_t max_actions_per_step,
-                   uint32_t max_events_per_step, uint32_t max_orders_per_agent,
-                   uint32_t num_threads, std::size_t linear_bytes = 1024 * 1024);
-                   
+    BatchSimulator(UnifiedMemoryArena* arena, uint32_t target_batch_size, uint32_t num_threads);
     ~BatchSimulator();
 
-    // Non-copyable (strict ownership of hardware threads and pinned memory)
+    // Prevent copying
     BatchSimulator(const BatchSimulator&) = delete;
     BatchSimulator& operator=(const BatchSimulator&) = delete;
 
     // ========================================================================
-    // THE HOT PATH (Called from Python)
-    // 1. Python writes directly to arena_.actions_ptr() (Zero-Copy)
-    // 2. Python calls step(num_commands)
-    // 3. Wakes up the C++ Thread Pool
-    // 4. Blocks Python thread natively until all C++ threads finish
+    // PYTHON RL INTERFACE
     // ========================================================================
-    void step(uint32_t num_commands);
-
-    // Fast reset for specific environments
-    void reset(const std::vector<uint32_t>& env_indices);
-
-    // Global reset
-    void reset_all();
-
-    // ========================================================================
-    // ZERO-COPY ACCESSORS FOR NANOBIND
-    // Returns raw pointers to our pre-allocated Pinned Memory Arena.
-    // ========================================================================
-    [[nodiscard]] inline ActionPayload* get_actions_tensor_ptr() noexcept { return arena_.actions_ptr(); }
-    [[nodiscard]] inline MarketDataEvent* get_events_tensor_ptr() noexcept { return arena_.events_ptr(); }
-    [[nodiscard]] inline ActiveOrderRecord* get_active_orders_tensor_ptr() noexcept { return arena_.active_orders_ptr(); }
     
-    [[nodiscard]] inline float* get_lob_tensor_ptr() noexcept { return arena_.lob_ptr(); }
-    [[nodiscard]] inline float* get_cash_tensor_ptr() noexcept { return arena_.cash_ptr(); }
-    [[nodiscard]] inline float* get_inventory_tensor_ptr() noexcept { return arena_.inventory_ptr(); }
+    // Starts the background thread pool
+    void start();
 
-    // --- Config Accessors ---
-    [[nodiscard]] inline uint32_t num_envs() const noexcept { return num_envs_; }
-    [[nodiscard]] inline uint32_t num_agents() const noexcept { return num_agents_; }
+    // Stops the thread pool cleanly
+    void stop();
+
+    // Blocks the Python thread until exactly `target_batch_size_` environments 
+    // have paused and are ready for inference. 
+    // Returns the total number of ready agents (could be >= target_batch_size).
+    uint32_t wait_for_batch() noexcept;
+
+    // Called by Python after writing actions to the Zero-Copy tensor.
+    // Reads actions where ready_mask == 1, pushes them to the scheduler, 
+    // clears the ready_mask, and unpauses those environments.
+    void resume_batch() noexcept;
+
+    // Resets specific environments (e.g., when an episode ends)
+    void reset(const std::vector<uint32_t>& env_indices) noexcept;
+    
+    // Global hard reset
+    void reset_all() noexcept;
+    
+    // Accessors for testing/debugging
+    [[nodiscard]] inline EnvironmentState<ObsDepth>& get_env(uint32_t env_idx) { return envs_[env_idx]; }
+    [[nodiscard]] inline FastScheduler& get_scheduler(uint32_t env_idx) { return schedulers_[env_idx]; }
 };
 
 }  // namespace titan::core
