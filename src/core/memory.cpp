@@ -125,14 +125,16 @@ UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
       linear_allocator_(linear_bytes) {
 
     // 1. Calculate byte sizes for each sector
-    const std::size_t nodes_bytes  = static_cast<std::size_t>(num_envs) * max_orders_per_env * sizeof(OrderNode);
+    const std::size_t nodes_bytes   = static_cast<std::size_t>(num_envs) * max_orders_per_env * sizeof(OrderNode);
     const std::size_t handles_bytes = static_cast<std::size_t>(num_envs) * max_orders_per_env * sizeof(Handle);
+    
+    const std::size_t ready_mask_bytes = static_cast<std::size_t>(num_envs) * num_agents * sizeof(uint8_t);
     const std::size_t actions_bytes = static_cast<std::size_t>(num_envs) * max_actions_per_step * sizeof(ActionPayload);
     const std::size_t events_bytes  = static_cast<std::size_t>(num_envs) * max_events_per_step * sizeof(MarketDataEvent);
     const std::size_t active_orders_bytes = static_cast<std::size_t>(num_envs) * num_agents * max_orders_per_agent * sizeof(ActiveOrderRecord);
     
-    // LOB: depth * 2 sides (bid/ask) * 2 values (price/qty)
-    const std::size_t lob_bytes = static_cast<std::size_t>(num_envs) * obs_depth * 4 * sizeof(float);
+    // LOB: num_agents * depth * 2 sides (bid/ask) * 2 values (price/qty)
+    const std::size_t lob_bytes = static_cast<std::size_t>(num_envs) * num_agents * obs_depth * 4 * sizeof(float);
     const std::size_t cash_bytes = static_cast<std::size_t>(num_envs) * num_agents * sizeof(float);
     const std::size_t inventory_bytes = static_cast<std::size_t>(num_envs) * num_agents * sizeof(float);
 
@@ -146,6 +148,10 @@ UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
     offset = align_up(offset + handles_bytes);
     
     bridge_tensors_offset_ = offset;
+    
+    const std::size_t ready_mask_offset = offset;
+    offset = align_up(offset + ready_mask_bytes);
+    
     const std::size_t actions_offset = offset;
     offset = align_up(offset + actions_bytes);
 
@@ -177,6 +183,8 @@ UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
     
     raw_nodes_         = reinterpret_cast<OrderNode*>(base_ptr + nodes_offset);
     raw_free_lists_    = reinterpret_cast<Handle*>(base_ptr + handles_offset);
+    
+    ready_mask_ptr_    = reinterpret_cast<uint8_t*>(base_ptr + ready_mask_offset);
     actions_ptr_       = reinterpret_cast<ActionPayload*>(base_ptr + actions_offset);
     events_ptr_        = reinterpret_cast<MarketDataEvent*>(base_ptr + events_offset);
     active_orders_ptr_ = reinterpret_cast<ActiveOrderRecord*>(base_ptr + active_orders_offset);
@@ -204,14 +212,16 @@ void UnifiedMemoryArena::reset(const std::vector<uint32_t>& env_indices) noexcep
         pools_[env_idx].reset();
 
         // Size calculation for single environment slices
+        const std::size_t ready_mask_slice = num_agents_ * sizeof(uint8_t);
         const std::size_t actions_slice = max_actions_per_step_ * sizeof(ActionPayload);
         const std::size_t events_slice  = max_events_per_step_ * sizeof(MarketDataEvent);
         const std::size_t active_orders_slice = num_agents_ * max_orders_per_agent_ * sizeof(ActiveOrderRecord);
-        const std::size_t lob_slice = obs_depth_ * 4 * sizeof(float);
+        const std::size_t lob_slice = num_agents_ * obs_depth_ * 4 * sizeof(float);
         const std::size_t cash_slice = num_agents_ * sizeof(float);
         const std::size_t inventory_slice = num_agents_ * sizeof(float);
 
         // Zero out specific environment data
+        std::memset(reinterpret_cast<std::byte*>(ready_mask_ptr_) + (env_idx * ready_mask_slice), 0, ready_mask_slice);
         std::memset(reinterpret_cast<std::byte*>(actions_ptr_) + (env_idx * actions_slice), 0, actions_slice);
         std::memset(reinterpret_cast<std::byte*>(events_ptr_) + (env_idx * events_slice), 0, events_slice);
         std::memset(reinterpret_cast<std::byte*>(active_orders_ptr_) + (env_idx * active_orders_slice), 0, active_orders_slice);
