@@ -1,16 +1,14 @@
 #include "titan/core/matching_engine.hpp"
 
 #include <algorithm>
-#include "titan/core/state.hpp"
 
 namespace titan::core {
 
 // ============================================================================
 // Internal Execution Helper
 // ============================================================================
-template <uint32_t ObsDepth>
-void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8_t taker_side, OrderQty& remaining_qty,
-                                   EnvironmentState<ObsDepth>& state) {
+void MatchingEngine::execute_trade(Handle maker_handle, OwnerId taker_id, uint8_t taker_side, OrderQty& remaining_qty,
+                                   EventList& out_events) {
     OrderNode& maker = pool_.get_node(maker_handle);
     
     // Determine how much can be traded
@@ -22,21 +20,25 @@ void MatchingEngine::execute_trade(Handle maker_handle, uint16_t taker_id, uint8
     maker.quantity -= trade_qty;
 
     // 2. Generate a TRADE event for the maker (passive side)
-    state.record_trade(maker.price, trade_qty, maker.owner_id, taker_id, maker.side);
+    out_events.push_back({
+        maker.id,                      // order_id
+        -trade_qty,                    // qty_delta
+        maker.price,                   // price
+        maker.owner_id,                // owner_id (maker)
+        taker_id,                      // taker_id
+        MarketDataEvent::Type::TRADE,  // type
+        maker.side                     // side
+    });
 
-    // 3. Update the maker's ActiveOrderRecord tracking
-    state.update_active_order_qty(maker.owner_id, maker.id, maker.quantity);
-
-    // 4. Update the remaining aggressive volume
+    // 3. Update the remaining aggressive volume
     remaining_qty -= trade_qty;
 }
 
 // ============================================================================
 // Process Limit / Market Orders
 // ============================================================================
-template <uint32_t ObsDepth>
-void MatchingEngine::process_order(uint16_t owner_id, uint8_t side, Price price, OrderQty qty,
-                                   EnvironmentState<ObsDepth>& state) {
+void MatchingEngine::process_order(OwnerId owner_id, uint8_t side, Price price, OrderQty qty,
+                                   EventList& out_events) {
 
     OrderQty remaining_qty = qty;
 
@@ -60,9 +62,15 @@ void MatchingEngine::process_order(uint16_t owner_id, uint8_t side, Price price,
             // SELF-TRADE PREVENTION (STP) - Cancel Resting Policy
             if (maker.owner_id == owner_id) [[unlikely]] {
                 // Generate CANCEL event
-                state.record_cancel(maker.price, maker.quantity, maker.owner_id, maker.side, maker.id);
-                // Free the tracking slot
-                state.clear_active_order(maker.owner_id, maker.id);
+                out_events.push_back({
+                    maker.id,
+                    -maker.quantity,
+                    maker.price,
+                    maker.owner_id,
+                    0,
+                    MarketDataEvent::Type::CANCEL,
+                    maker.side
+                });
                 
                 lob_.remove_order(maker_handle, pool_);
                 pool_.free(maker_handle);
@@ -70,11 +78,10 @@ void MatchingEngine::process_order(uint16_t owner_id, uint8_t side, Price price,
             }
 
             // Execute the cross trade (modifies remaining_qty by reference)
-            execute_trade(maker_handle, owner_id, side, remaining_qty, state);
+            execute_trade(maker_handle, owner_id, side, remaining_qty, out_events);
 
             // If the passive maker order is completely depleted, remove it permanently
             if (maker.quantity == 0) {
-                state.clear_active_order(maker.owner_id, maker.id);
                 lob_.remove_order(maker_handle, pool_);
                 pool_.free(maker_handle);
             }
@@ -97,18 +104,24 @@ void MatchingEngine::process_order(uint16_t owner_id, uint8_t side, Price price,
 
             // SELF-TRADE PREVENTION (STP) - Cancel Resting Policy
             if (maker.owner_id == owner_id) [[unlikely]] {
-                state.record_cancel(maker.price, maker.quantity, maker.owner_id, maker.side, maker.id);
-                state.clear_active_order(maker.owner_id, maker.id);
+                out_events.push_back({
+                    maker.id,
+                    -maker.quantity,
+                    maker.price,
+                    maker.owner_id,
+                    0,
+                    MarketDataEvent::Type::CANCEL,
+                    maker.side
+                });
                 
                 lob_.remove_order(maker_handle, pool_);
                 pool_.free(maker_handle);
                 continue;
             }
 
-            execute_trade(maker_handle, owner_id, side, remaining_qty, state);
+            execute_trade(maker_handle, owner_id, side, remaining_qty, out_events);
 
             if (maker.quantity == 0) {
-                state.clear_active_order(maker.owner_id, maker.id);
                 lob_.remove_order(maker_handle, pool_);
                 pool_.free(maker_handle);
             }
@@ -122,11 +135,16 @@ void MatchingEngine::process_order(uint16_t owner_id, uint8_t side, Price price,
         OrderId smart_id = lob_.add_order(owner_id, price, remaining_qty, side, pool_);
 
         if (smart_id != 0) [[likely]] {
-            // Track the order in the Zero-Copy Array so Python knows its ID
-            state.add_active_order(owner_id, smart_id, remaining_qty);
-
             // Broadcast the acceptance
-            state.record_accepted(price, remaining_qty, owner_id, side, smart_id);
+            out_events.push_back({
+                smart_id,
+                remaining_qty,
+                price,
+                owner_id,
+                0,
+                MarketDataEvent::Type::ACCEPTED,
+                side
+            });
         }
     }
 }
@@ -134,9 +152,8 @@ void MatchingEngine::process_order(uint16_t owner_id, uint8_t side, Price price,
 // ============================================================================
 // Process Cancellations (O(1) Smart ID Lookup + ABA Protection)
 // ============================================================================
-template <uint32_t ObsDepth>
-void MatchingEngine::process_cancel(OrderId target_order_id, uint16_t requesting_owner_id,
-                                    EnvironmentState<ObsDepth>& state) {
+void MatchingEngine::process_cancel(OrderId target_order_id, OwnerId requesting_owner_id,
+                                    EventList& out_events) {
     if (target_order_id == 0) [[unlikely]] {
         return; // Reject empty ID
     }
@@ -153,8 +170,6 @@ void MatchingEngine::process_cancel(OrderId target_order_id, uint16_t requesting
     OrderNode& node = pool_.get_node(h);
 
     // 3. SECURE ABA PROTECTION 
-    // If the generation counters do not match, or the physical memory ID differs,
-    // this memory cell has already been reused by another order. The cancel is stale.
     if (node.generation != target_gen || node.id != target_order_id) [[unlikely]] {
         return;
     }
@@ -174,11 +189,16 @@ void MatchingEngine::process_cancel(OrderId target_order_id, uint16_t requesting
     // 6. Free the memory back to the LIFO pool (increments Generation)
     pool_.free(h);
 
-    // 7. Clear Zero-Copy tracking array
-    state.clear_active_order(requesting_owner_id, target_order_id);
-
-    // 8. Generate an event for Python to observe
-    state.record_cancel(p, q, requesting_owner_id, side, target_order_id);
+    // 7. Generate an event for Python to observe
+    out_events.push_back({
+        target_order_id,
+        -q,
+        p,
+        requesting_owner_id,
+        0,
+        MarketDataEvent::Type::CANCEL,
+        side
+    });
 }
 
 // ============================================================================
@@ -187,13 +207,5 @@ void MatchingEngine::process_cancel(OrderId target_order_id, uint16_t requesting
 void MatchingEngine::reset() noexcept {
     lob_.reset();
 }
-
-// ============================================================================
-// EXPLICIT TEMPLATE INSTANTIATION FOR METHODS
-// ============================================================================
-// We explicitly instantiate the methods for the default observation depth of 20
-template void MatchingEngine::execute_trade<DEFAULT_OBS_DEPTH>(Handle, uint16_t, uint8_t, OrderQty&, EnvironmentState<DEFAULT_OBS_DEPTH>&);
-template void MatchingEngine::process_order<DEFAULT_OBS_DEPTH>(uint16_t, uint8_t, Price, OrderQty, EnvironmentState<DEFAULT_OBS_DEPTH>&);
-template void MatchingEngine::process_cancel<DEFAULT_OBS_DEPTH>(OrderId, uint16_t, EnvironmentState<DEFAULT_OBS_DEPTH>&);
 
 }  // namespace titan::core
