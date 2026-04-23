@@ -11,21 +11,51 @@
 namespace titan::core {
 
 // ============================================================================
-// 1. THE PAYLOAD (Data)
-// Size: Exactly 32 bytes (Perfectly occupies half of a 64-byte Cache Line).
-// This struct is stored in a stationary Pool Allocator to prevent cache churn.
+// 1. FAT EVENT PAYLOAD (For Routing logic, not for sorting)
+// Stored in a separate pool to keep the sorting heap ultra-light (16 bytes).
+// Compressed to 48 bytes using an anonymous union to fit within a single Cache Line.
 // ============================================================================
-struct alignas(32) ActionPayload {
-    OrderQty qty;
-    OrderId target_id;    // Used for Cancel operations (Smart ID)
-    Price price;
-    uint32_t env_id;      // For multi-environment RL scenarios
-    OwnerId agent_id;
-    uint8_t action_type;  // 0: Limit Order, 1: Cancel, 2: Market Order
-    uint8_t side;         // 0: Bid, 1: Ask
-    uint8_t _padding[4];  // Explicit padding for strict 32-byte alignment
+struct alignas(8) ScheduledEvent {
+    enum class Type : uint8_t { AGENT_WAKEUP, ORDER_ARRIVAL, MARKET_DATA };
+
+    uint64_t time;        // 8 bytes
+    uint32_t target_id;   // 4 bytes
+    Type type;            // 1 byte
+    uint8_t _padding[3];  // 3 bytes padding for 8-byte alignment
+
+    // Anonymous union: ActionPayload and MarketDataEvent share the same 32 bytes of memory.
+    // Safe because both are strictly POD types.
+    union {
+        ActionPayload action;
+        MarketDataEvent market_data;
+    };
+
+    // Factories
+    static inline ScheduledEvent agent_wakeup(uint64_t t, uint32_t agent) noexcept {
+        ScheduledEvent e{}; 
+        e.time = t; 
+        e.target_id = agent; 
+        e.type = Type::AGENT_WAKEUP; 
+        return e;
+    }
+    static inline ScheduledEvent order_arrival(uint64_t t, uint32_t agent, const ActionPayload& act) noexcept {
+        ScheduledEvent e{}; 
+        e.time = t; 
+        e.target_id = agent; 
+        e.type = Type::ORDER_ARRIVAL; 
+        e.action = act; 
+        return e;
+    }
+    static inline ScheduledEvent market_data(uint64_t t, uint32_t agent, const MarketDataEvent& md) noexcept {
+        ScheduledEvent e{}; 
+        e.time = t; 
+        e.target_id = agent; 
+        e.type = Type::MARKET_DATA; 
+        e.market_data = md; 
+        return e;
+    }
 };
-static_assert(sizeof(ActionPayload) == 32, "ActionPayload must be exactly 32 bytes");
+static_assert(sizeof(ScheduledEvent) == 48, "ScheduledEvent must be 48 bytes to fit in a cache line");
 
 // ============================================================================
 // 2. THE ROUTING KEY (Metadata)
@@ -34,7 +64,7 @@ static_assert(sizeof(ActionPayload) == 32, "ActionPayload must be exactly 32 byt
 // ============================================================================
 struct alignas(16) HeapNode {
     uint64_t arrival_time;  // Primary Min-Heap sorting key
-    uint32_t payload_idx;   // Index into the ActionPayload Arena
+    uint32_t payload_idx;   // Index into the ScheduledEvent Pool
     uint32_t sequence_id;   // Strict FIFO tie-breaker for simultaneous events
 };
 static_assert(sizeof(HeapNode) == 16, "HeapNode must be exactly 16 bytes");
@@ -214,7 +244,52 @@ public:
     }
 };
 
-// Default Projekt-wide Scheduler tuned for 64-byte cache prefetchers
-using FastScheduler = FastDAryHeap<4>;
+// ============================================================================
+// 4. FAST SCHEDULER (Combines the 16-byte Heap with a Payload Pool)
+// ============================================================================
+class FastScheduler {
+private:
+    FastDAryHeap<4> heap_;
+    std::vector<ScheduledEvent> payloads_;
+    std::vector<uint32_t> free_list_;
+
+public:
+    explicit FastScheduler(uint32_t max_capacity = 65536) : heap_(max_capacity) {
+        payloads_.reserve(max_capacity);
+        free_list_.reserve(max_capacity);
+    }
+
+    inline void push(const ScheduledEvent& ev) noexcept {
+        uint32_t idx;
+        if (!free_list_.empty()) {
+            idx = free_list_.back();
+            free_list_.pop_back();
+            payloads_[idx] = ev;
+        } else {
+            idx = static_cast<uint32_t>(payloads_.size());
+            payloads_.push_back(ev);
+        }
+        heap_.push(ev.time, idx);
+    }
+
+    [[nodiscard]] inline const ScheduledEvent& top() const noexcept {
+        return payloads_[heap_.top().payload_idx];
+    }
+
+    inline void pop() noexcept {
+        free_list_.push_back(heap_.top().payload_idx);
+        heap_.pop();
+    }
+
+    [[nodiscard]] inline bool empty() const noexcept { 
+        return heap_.empty(); 
+    }
+
+    inline void clear() noexcept {
+        heap_.clear();
+        payloads_.clear();
+        free_list_.clear();
+    }
+};
 
 }  // namespace titan::core

@@ -74,7 +74,7 @@ static_assert(sizeof(ActiveOrderRecord) == 16, "ActiveOrderRecord must be exactl
 // 3. ZERO-COPY INPUTS (Actions)
 // Optimized to strictly fit exactly 32 bytes (Half a Cache Line)
 // ============================================================================
-struct alignas(32) ActionPayload {
+struct alignas(8) ActionPayload {
     OrderId target_id;    // 8 bytes (Used for Cancel operations)
     OrderQty qty;         // 8 bytes
     Price price;          // 4 bytes
@@ -91,18 +91,19 @@ static_assert(sizeof(ActionPayload) == 32, "ActionPayload must be exactly 32 byt
 // ============================================================================
 // 4. ZERO-COPY OUTPUTS (Market Data Events)
 // ============================================================================
-struct MarketDataEvent {
-    enum class Type : uint8_t { TRADE, LOB_UPDATE, ORDER_ACCEPTED, ORDER_REJECTED };
+struct alignas(8) MarketDataEvent {
+    enum class Type : uint8_t { TRADE, LOB_UPDATE, ORDER_ACCEPTED, ORDER_REJECTED, CANCEL };
     
-    uint64_t timestamp;
-    OrderId order_id;
-    OrderQty qty;
-    Price price;
-    OwnerId owner_id;
-    OwnerId taker_id;
-    Type type;
-    uint8_t side;
+    OrderId order_id;     // 8 bytes
+    OrderQty qty_delta;   // 8 bytes
+    Price price;          // 4 bytes
+    OwnerId owner_id;     // 2 bytes
+    OwnerId taker_id;     // 2 bytes
+    Type type;            // 1 byte
+    uint8_t side;         // 1 byte
+    uint8_t _padding[6];  // 6 bytes padding to hit exactly 32 bytes
 };
+static_assert(sizeof(MarketDataEvent) == 32, "MarketDataEvent must be exactly 32 bytes");
 
 using EventList = std::vector<MarketDataEvent>;
 
