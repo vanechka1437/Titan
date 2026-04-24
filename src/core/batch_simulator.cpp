@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
+#include <mutex>
 
 namespace titan::core {
 
@@ -25,7 +27,11 @@ BatchSimulator<ObsDepth>::BatchSimulator(UnifiedMemoryArena* arena, uint32_t tar
     for (uint32_t i = 0; i < num_envs_; ++i) {
         envs_.emplace_back(i, num_agents_per_env_, arena->max_events_per_step(), arena->max_orders_per_agent(), arena_);
         engines_.emplace_back(arena_->order_pool(i));
-        env_paused_[i].store(false, std::memory_order_relaxed);
+        
+        // Environments are initialized in a paused state. 
+        // This prevents worker threads from spinning on empty queues 
+        // while the initial data is being loaded by the host thread.
+        env_paused_[i].store(true, std::memory_order_relaxed);
     }
 
     // 2. Partition environments among threads evenly
@@ -79,7 +85,8 @@ void BatchSimulator<ObsDepth>::worker_loop(uint32_t thread_id) {
         bool idle = true;
 
         for (uint32_t env_id = bounds.start_env; env_id < bounds.end_env; ++env_id) {
-            // Skip if environment is paused (waiting for Python)
+            
+            // Skip if environment is paused (waiting for external synchronization)
             if (env_paused_[env_id].load(std::memory_order_acquire)) {
                 continue;
             }
@@ -89,16 +96,14 @@ void BatchSimulator<ObsDepth>::worker_loop(uint32_t thread_id) {
             MatchingEngine& engine = engines_[env_id];
             FastScheduler& scheduler = schedulers_[env_id];
 
-            // 1. Safety Valve: Buffer Overflow Protection (Data Flush)
-            if (env.needs_flush()) [[unlikely]] {
-                env_paused_[env_id].store(true, std::memory_order_release);
-                batch_cv_.notify_one(); 
-                continue;
-            }
-
-            // 2. Process events exactly up to the next required agent decision
+            // Process events up to the next required agent decision
             while (!scheduler.empty()) {
-                const auto& event = scheduler.top();
+                
+                // Extract event by value and pop immediately.
+                // This prevents dangling references if a newly pushed event 
+                // triggers a reallocation within the underlying priority queue.
+                const ScheduledEvent event = scheduler.top();
+                scheduler.pop(); 
                 
                 // Advance the simulated clock
                 env.current_time = event.time;
@@ -106,23 +111,23 @@ void BatchSimulator<ObsDepth>::worker_loop(uint32_t thread_id) {
                 // --- A. Agent is Ready to Act (SMDP Wakeup) ---
                 if (event.type == ScheduledEvent::Type::AGENT_WAKEUP) {
                     const uint32_t agent_id = event.target_id;
-                    
-                    // Mark agent as ready in Zero-Copy Mask
                     const std::size_t mask_idx = (env_id * num_agents_per_env_) + agent_id;
+                    
+                    // Mark agent as ready in the Zero-Copy DLPack mask
                     arena_->ready_mask_ptr()[mask_idx] = 1;
                     
-                    // Export this agent's localized observation
+                    // Export localized observations
                     env.agents[agent_id].export_observations();
-                    
-                    // Atomically increment global batch counter
-                    ready_count_.fetch_add(1, std::memory_order_release);
-                    
-                    // Pause the environment
+
+                    // Suspend physics for this environment
                     env_paused_[env_id].store(true, std::memory_order_release);
                     
-                    scheduler.pop();
+                    // Atomically increment the global readiness counter
+                    ready_count_.fetch_add(1, std::memory_order_release);
+                    
+                    // Notify the host thread
                     batch_cv_.notify_one(); 
-                    break; // Break DES loop, move to next env
+                    break;
                 }
                 
                 // --- B. Order Arrival at Exchange ---
@@ -134,19 +139,23 @@ void BatchSimulator<ObsDepth>::worker_loop(uint32_t thread_id) {
                         engine.process_order(event.target_id, event.action.side, event.action.price, event.action.qty, engine_events);
                     }
                     
-                    // Route the resulting events back to agents via Egress Delay
+                    // Route resulting events to agents and update zero-copy history
                     for (const auto& ev : engine_events) {
-                        // Record global trajectory event for PyTorch
-                        env.record_public_event(ev);
-
-                        // Route to Maker
-                        uint64_t maker_arrival_time = env.current_time + env.agents[ev.owner_id].egress_delay;
-                        scheduler.push(ScheduledEvent::market_data(maker_arrival_time, ev.owner_id, ev));
+                        uint64_t cursor = arena_->event_cursors_ptr()[env_id];
+                        uint64_t ring_idx = cursor % arena_->max_events_per_step();
+                        uint64_t env_offset = env_id * arena_->max_events_per_step();
                         
-                        // Route to Taker (if TRADE)
+                        arena_->events_ptr()[env_offset + ring_idx] = ev;
+                        arena_->event_cursors_ptr()[env_id] = cursor + 1;
+
+                        // Route notification to Maker
+                        uint64_t maker_arrival_time = env.current_time + env.agents[ev.owner_id].egress_delay;
+                        scheduler.push(ScheduledEvent::make_market_data(maker_arrival_time, ev.owner_id, ev));
+                        
+                        // Route notification to Taker (if applicable)
                         if (ev.type == MarketDataEvent::Type::TRADE && ev.taker_id != ev.owner_id) {
                             uint64_t taker_arrival_time = env.current_time + env.agents[ev.taker_id].egress_delay;
-                            scheduler.push(ScheduledEvent::market_data(taker_arrival_time, ev.taker_id, ev));
+                            scheduler.push(ScheduledEvent::make_market_data(taker_arrival_time, ev.taker_id, ev));
                         }
                     }
                 }
@@ -156,17 +165,20 @@ void BatchSimulator<ObsDepth>::worker_loop(uint32_t thread_id) {
                     AgentState<ObsDepth>& agent = env.agents[event.target_id];
                     agent.apply_event(event.market_data);
                     
-                    // If agent receives data, schedule its compute_delay wakeup
+                    // Schedule subsequent decision-making wakeup
                     uint64_t wakeup_time = env.current_time + agent.compute_delay;
                     agent.next_wakeup_time = wakeup_time;
-                    scheduler.push(ScheduledEvent::agent_wakeup(wakeup_time, agent.id));
+                    scheduler.push(ScheduledEvent::make_agent_wakeup(wakeup_time, agent.id));
                 }
+            }
 
-                scheduler.pop();
+            // Lock-Free Safety: If the queue emptied out naturally without an AGENT_WAKEUP,
+            // we must pause the environment to await further Python injection.
+            if (scheduler.empty()) {
+                env_paused_[env_id].store(true, std::memory_order_release);
             }
         }
 
-        // If all assigned environments are paused, yield CPU to prevent spinning
         if (idle) {
             std::this_thread::yield();
         }
@@ -180,7 +192,6 @@ template <uint32_t ObsDepth>
 uint32_t BatchSimulator<ObsDepth>::wait_for_batch() noexcept {
     std::unique_lock<std::mutex> lock(batch_mutex_);
     
-    // Wait until BATCH_SIZE is reached, OR timeout occurs (Straggler Protection)
     batch_cv_.wait_for(lock, std::chrono::milliseconds(1), [this]() {
         return ready_count_.load(std::memory_order_acquire) >= target_batch_size_;
     });
@@ -193,42 +204,40 @@ void BatchSimulator<ObsDepth>::resume_batch() noexcept {
     uint8_t* ready_mask = arena_->ready_mask_ptr();
     const ActionPayload* actions = arena_->actions_ptr();
 
+    ready_count_.store(0, std::memory_order_release);
+
     for (uint32_t env_id = 0; env_id < num_envs_; ++env_id) {
         bool env_was_active_in_batch = false;
 
-        // 1. Process Actions & Clear Masks
         for (uint32_t agent_id = 0; agent_id < num_agents_per_env_; ++agent_id) {
-            const std::size_t idx = (env_id * num_agents_per_env_) + agent_id;
+            const std::size_t mask_idx = (env_id * num_agents_per_env_) + agent_id;
             
-            if (ready_mask[idx] == 1) {
+            if (ready_mask[mask_idx] == 1) {
                 env_was_active_in_batch = true;
-                ready_mask[idx] = 0; // Clear mask
+                ready_mask[mask_idx] = 0; 
 
-                const ActionPayload& action = actions[idx];
+                const std::size_t action_idx = (env_id * arena_->max_actions_per_step()) + agent_id;
+                const ActionPayload& action = actions[action_idx];
                 
-                // NO_OP handling
                 if (action.action_type == 3) {
                     uint64_t next_wakeup = envs_[env_id].current_time + envs_[env_id].agents[agent_id].compute_delay;
-                    schedulers_[env_id].push(ScheduledEvent::agent_wakeup(next_wakeup, agent_id));
+                    schedulers_[env_id].push(ScheduledEvent::make_agent_wakeup(next_wakeup, agent_id));
                     continue; 
                 }
 
-                // Inject action into scheduler with Network Ingress Delay
                 uint64_t arrival_time = envs_[env_id].current_time + envs_[env_id].agents[agent_id].ingress_delay;
-                schedulers_[env_id].push(ScheduledEvent::order_arrival(arrival_time, agent_id, action));
+                schedulers_[env_id].push(ScheduledEvent::make_order_arrival(arrival_time, agent_id, action));
             }
         }
 
-        // 2. Unpause environment
-        // If it was active in this batch, or if it was paused solely due to buffer flush
-        if (env_was_active_in_batch || env_paused_[env_id].load(std::memory_order_acquire)) {
-            envs_[env_id].prepare_for_step(); // Clears historical event buffer
+        if (env_was_active_in_batch) {
             env_paused_[env_id].store(false, std::memory_order_release);
+        } else if (env_paused_[env_id].load(std::memory_order_acquire)) {
+            if (!schedulers_[env_id].empty()) {
+                env_paused_[env_id].store(false, std::memory_order_release);
+            }
         }
     }
-
-    // Reset global counter
-    ready_count_.store(0, std::memory_order_release);
 }
 
 // ============================================================================
@@ -236,26 +245,29 @@ void BatchSimulator<ObsDepth>::resume_batch() noexcept {
 // ============================================================================
 template <uint32_t ObsDepth>
 void BatchSimulator<ObsDepth>::reset(const std::vector<uint32_t>& env_indices) noexcept {
+    arena_->reset(env_indices);
+
     for (uint32_t env_id : env_indices) {
-        env_paused_[env_id].store(true, std::memory_order_relaxed); // Temporarily halt
+        env_paused_[env_id].store(true, std::memory_order_relaxed); 
         
         envs_[env_id].reset();
         engines_[env_id].reset();
         schedulers_[env_id].clear();
-        
-        env_paused_[env_id].store(false, std::memory_order_release);
     }
 }
 
 template <uint32_t ObsDepth>
 void BatchSimulator<ObsDepth>::reset_all() noexcept {
+    arena_->reset_all();
+
     for (uint32_t i = 0; i < num_envs_; ++i) {
         env_paused_[i].store(true, std::memory_order_relaxed);
+        
         envs_[i].reset();
         engines_[i].reset();
         schedulers_[i].clear();
-        env_paused_[i].store(false, std::memory_order_release);
     }
+    
     ready_count_.store(0, std::memory_order_relaxed);
 }
 
