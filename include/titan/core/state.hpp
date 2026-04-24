@@ -36,7 +36,7 @@ inline uint32_t pop_lsb(uint64_t& mask) noexcept {
 #include <cstring>
 #include <vector>
 
-#include "titan/core/matching_engine.hpp"
+#include "titan/core/lob_state.hpp"
 #include "titan/core/memory.hpp"
 #include "titan/core/types.hpp"
 

@@ -31,28 +31,14 @@ struct alignas(8) ScheduledEvent {
     };
 
     // Factories
-    static inline ScheduledEvent agent_wakeup(uint64_t t, uint32_t agent) noexcept {
-        ScheduledEvent e{}; 
-        e.time = t; 
-        e.target_id = agent; 
-        e.type = Type::AGENT_WAKEUP; 
-        return e;
+    static inline ScheduledEvent make_agent_wakeup(uint64_t t, uint32_t agent) noexcept {
+        ScheduledEvent e{}; e.time = t; e.target_id = agent; e.type = Type::AGENT_WAKEUP; return e;
     }
-    static inline ScheduledEvent order_arrival(uint64_t t, uint32_t agent, const ActionPayload& act) noexcept {
-        ScheduledEvent e{}; 
-        e.time = t; 
-        e.target_id = agent; 
-        e.type = Type::ORDER_ARRIVAL; 
-        e.action = act; 
-        return e;
+    static inline ScheduledEvent make_order_arrival(uint64_t t, uint32_t agent, const ActionPayload& act) noexcept {
+        ScheduledEvent e{}; e.time = t; e.target_id = agent; e.type = Type::ORDER_ARRIVAL; e.action = act; return e;
     }
-    static inline ScheduledEvent market_data(uint64_t t, uint32_t agent, const MarketDataEvent& md) noexcept {
-        ScheduledEvent e{}; 
-        e.time = t; 
-        e.target_id = agent; 
-        e.type = Type::MARKET_DATA; 
-        e.market_data = md; 
-        return e;
+    static inline ScheduledEvent make_market_data(uint64_t t, uint32_t agent, const MarketDataEvent& md) noexcept {
+        ScheduledEvent e{}; e.time = t; e.target_id = agent; e.type = Type::MARKET_DATA; e.market_data = md; return e;
     }
 };
 static_assert(sizeof(ScheduledEvent) == 48, "ScheduledEvent must be 48 bytes to fit in a cache line");
@@ -195,6 +181,26 @@ public:
     FastDAryHeap(const FastDAryHeap&) = delete;
     FastDAryHeap& operator=(const FastDAryHeap&) = delete;
 
+    FastDAryHeap(FastDAryHeap&& other) noexcept
+        : data_(other.data_), size_(other.size_), 
+          max_capacity_(other.max_capacity_), sequence_counter_(other.sequence_counter_) {
+        other.data_ = nullptr; // Забираем владение у старого объекта
+        other.size_ = 0;
+    }
+
+    FastDAryHeap& operator=(FastDAryHeap&& other) noexcept {
+        if (this != &other) {
+            if (data_) ::operator delete[](data_, std::align_val_t{64});
+            data_ = other.data_;
+            size_ = other.size_;
+            max_capacity_ = other.max_capacity_;
+            sequence_counter_ = other.sequence_counter_;
+            other.data_ = nullptr;
+            other.size_ = 0;
+        }
+        return *this;
+    }
+
     [[nodiscard]] inline bool empty() const noexcept { return size_ == 0; }
     [[nodiscard]] inline std::size_t size() const noexcept { return size_; }
     [[nodiscard]] inline const HeapNode& top() const noexcept { return data_[0]; }
@@ -237,8 +243,8 @@ public:
         size_ = 0;
         sequence_counter_ = 0;  // Reset monotonic ID for the next RL episode
 
-        // Initialize the first two cache lines of sentinels
-        for (uint32_t i = 0; i < Arity * 2; ++i) {
+        // CRITICAL FIX: Safe initialization regardless of capacity
+        for (std::size_t i = 0; i < max_capacity_ + Arity; ++i) {
             data_[i] = {0xFFFFFFFFFFFFFFFFULL, 0, 0xFFFFFFFF};
         }
     }
@@ -252,27 +258,38 @@ private:
     FastDAryHeap<4> heap_;
     std::vector<ScheduledEvent> payloads_;
     std::vector<uint32_t> free_list_;
+    uint32_t max_capacity_;
 
 public:
-    explicit FastScheduler(uint32_t max_capacity = 65536) : heap_(max_capacity) {
+    explicit FastScheduler(uint32_t max_capacity = 65536) : heap_(max_capacity), max_capacity_(max_capacity) {
         payloads_.reserve(max_capacity);
         free_list_.reserve(max_capacity);
     }
 
-    inline void push(const ScheduledEvent& ev) noexcept {
+    FastScheduler(const FastScheduler&) = delete;
+    FastScheduler& operator=(const FastScheduler&) = delete;
+
+    FastScheduler(FastScheduler&&) noexcept = default;
+    FastScheduler& operator=(FastScheduler&&) noexcept = default;
+
+    // Returns true if successfully scheduled, false on sandbox overflow
+    inline bool push(const ScheduledEvent& ev) noexcept {
+        // CRITICAL FIX: Verify capacity before modifying payload pool
+        if (heap_.size() >= max_capacity_) [[unlikely]] return false;
+
         uint32_t idx;
         if (!free_list_.empty()) {
             idx = free_list_.back();
             free_list_.pop_back();
             payloads_[idx] = ev;
         } else {
+            // Because of the size check above, this push_back will never reallocate or throw
             idx = static_cast<uint32_t>(payloads_.size());
             payloads_.push_back(ev);
         }
         
-        if (!heap_.push(ev.time, idx)) [[unlikely]] {
-            free_list_.push_back(idx);
-        }
+        heap_.push(ev.time, idx);
+        return true;
     }
 
     [[nodiscard]] inline const ScheduledEvent& top() const noexcept {
@@ -280,13 +297,15 @@ public:
     }
 
     inline void pop() noexcept {
+        // CRITICAL FIX: Prevent double-free logic errors on empty heap
+        if (heap_.empty()) [[unlikely]] return;
+        
         free_list_.push_back(heap_.top().payload_idx);
         heap_.pop();
     }
 
-    [[nodiscard]] inline bool empty() const noexcept { 
-        return heap_.empty(); 
-    }
+    [[nodiscard]] inline bool empty() const noexcept { return heap_.empty(); }
+    [[nodiscard]] inline std::size_t size() const noexcept { return heap_.size(); }
 
     inline void clear() noexcept {
         heap_.clear();

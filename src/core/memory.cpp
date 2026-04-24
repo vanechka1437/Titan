@@ -137,6 +137,9 @@ UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
     const std::size_t lob_bytes = static_cast<std::size_t>(num_envs) * num_agents * obs_depth * 4 * sizeof(float);
     const std::size_t cash_bytes = static_cast<std::size_t>(num_envs) * num_agents * sizeof(float);
     const std::size_t inventory_bytes = static_cast<std::size_t>(num_envs) * num_agents * sizeof(float);
+    
+    // Event Cursors
+    const std::size_t event_cursors_bytes = static_cast<std::size_t>(num_envs) * sizeof(uint64_t);
 
     // 2. Align offsets to 64 bytes (cache line) to prevent false sharing
     std::size_t offset = 0;
@@ -170,6 +173,9 @@ UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
     const std::size_t inventory_offset = offset;
     offset = align_up(offset + inventory_bytes);
 
+    const std::size_t event_cursors_offset = offset;
+    offset = align_up(offset + event_cursors_bytes);
+
     total_pinned_bytes_ = offset;
 
     // 3. Allocate Pinned Memory Block
@@ -191,6 +197,7 @@ UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
     lob_ptr_           = reinterpret_cast<float*>(base_ptr + lob_offset);
     cash_ptr_          = reinterpret_cast<float*>(base_ptr + cash_offset);
     inventory_ptr_     = reinterpret_cast<float*>(base_ptr + inventory_offset);
+    event_cursors_ptr_ = reinterpret_cast<uint64_t*>(base_ptr + event_cursors_offset);
 
     // 5. Initialize Pools
     for (uint32_t env_idx = 0; env_idx < num_envs_; ++env_idx) {
@@ -228,6 +235,9 @@ void UnifiedMemoryArena::reset(const std::vector<uint32_t>& env_indices) noexcep
         std::memset(reinterpret_cast<std::byte*>(lob_ptr_) + (env_idx * lob_slice), 0, lob_slice);
         std::memset(reinterpret_cast<std::byte*>(cash_ptr_) + (env_idx * cash_slice), 0, cash_slice);
         std::memset(reinterpret_cast<std::byte*>(inventory_ptr_) + (env_idx * inventory_slice), 0, inventory_slice);
+        
+        // Reset event cursor
+        event_cursors_ptr_[env_idx] = 0;
     }
 }
 

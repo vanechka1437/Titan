@@ -155,6 +155,9 @@ public:
     LOBState(const LOBState&) = delete;
     LOBState& operator=(const LOBState&) = delete;
 
+    LOBState(LOBState&&) noexcept = default;
+    LOBState& operator=(LOBState&&) noexcept = default;
+
     // --- Public API ---
 
     // Core insertion. Returns the Smart OrderId (Generation + Handle).

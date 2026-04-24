@@ -64,7 +64,7 @@ void MatchingEngine::process_order(OwnerId owner_id, uint8_t side, Price price, 
                 // Generate CANCEL event
                 out_events.push_back({
                     maker.id,
-                    -maker.quantity,
+                    static_cast<OrderQty>(-maker.quantity), // Kept from your implementation
                     maker.price,
                     maker.owner_id,
                     0,
@@ -106,7 +106,7 @@ void MatchingEngine::process_order(OwnerId owner_id, uint8_t side, Price price, 
             if (maker.owner_id == owner_id) [[unlikely]] {
                 out_events.push_back({
                     maker.id,
-                    -maker.quantity,
+                    static_cast<OrderQty>(-maker.quantity),
                     maker.price,
                     maker.owner_id,
                     0,
@@ -128,21 +128,51 @@ void MatchingEngine::process_order(OwnerId owner_id, uint8_t side, Price price, 
         }
     }
 
-    // 3. PASSIVE ORDER ROUTING (Resting Limit Order)
-    if (remaining_qty > 0 && price != 0 && price != UINT32_MAX) {
+    // --- 3. PASSIVE ORDER ROUTING & REJECT HANDLING ---
+    // If we still have quantity left after attempting to cross the spread
+    if (remaining_qty > 0) {
         
-        // Let LOBState forge the Smart ID
-        OrderId smart_id = lob_.add_order(owner_id, price, remaining_qty, side, pool_);
+        // Limit Order check: Price must be valid (Not 0 and not UINT32_MAX)
+        if (price != 0 && price != UINT32_MAX) {
+            
+            // Let LOBState forge the Smart ID
+            OrderId smart_id = lob_.add_order(owner_id, price, remaining_qty, side, pool_);
 
-        if (smart_id != 0) [[likely]] {
-            // Broadcast the acceptance
+            if (smart_id != 0) [[likely]] {
+                // Broadcast the acceptance (Successfully added to order book)
+                out_events.push_back({
+                    smart_id,
+                    remaining_qty,
+                    price,
+                    owner_id,
+                    0,
+                    MarketDataEvent::Type::ACCEPTED,
+                    side
+                });
+            } else {
+                // Memory Pool Exhaustion! 
+                // Cannot add to book. Reject the order so the agent wakes up.
+                out_events.push_back({
+                    0, // No valid ID
+                    remaining_qty,
+                    price,
+                    owner_id,
+                    0,
+                    MarketDataEvent::Type::REJECTED,
+                    side
+                });
+            }
+        } else {
+            // Ghost Order Prevention!
+            // It's a Market Order (or IOC) that couldn't be fully filled because 
+            // the opposite book is empty. Reject the unfilled remainder.
             out_events.push_back({
-                smart_id,
+                0, // Market orders don't have a resting ID
                 remaining_qty,
                 price,
                 owner_id,
                 0,
-                MarketDataEvent::Type::ACCEPTED,
+                MarketDataEvent::Type::REJECTED,
                 side
             });
         }

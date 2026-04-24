@@ -12,8 +12,6 @@
 #include <vector>
 
 #include "titan/core/types.hpp"
-#include "titan/core/scheduler.hpp"
-#include "titan/core/matching_engine.hpp"
 
 namespace titan::core {
 
@@ -126,7 +124,7 @@ private:
     uint8_t* ready_mask_ptr_{nullptr};
 
     // 1. Input Command Stream
-    // Shape: [num_envs, num_agents]
+    // Shape: [num_envs, max_actions_per_step]
     ActionPayload* actions_ptr_{nullptr};
     
     // 2. Output Event Stream (Global Historical Ring Buffer per Env)
@@ -134,7 +132,7 @@ private:
     MarketDataEvent* events_ptr_{nullptr};
     
     // 3. Agent State Tracking
-    // Shape: [num_envs, num_agents, max_orders_per_agent]
+    // Shape: [num_envs, max_active_orders]
     ActiveOrderRecord* active_orders_ptr_{nullptr};
     
     // 4. Observations (Personalized realities due to latency)
@@ -144,6 +142,9 @@ private:
     // Shape: [num_envs, num_agents]
     float* cash_ptr_{nullptr};
     float* inventory_ptr_{nullptr};
+
+    // Shape: [num_envs]
+    uint64_t* event_cursors_ptr_{nullptr};
 
     LinearAllocator linear_allocator_;
 
@@ -168,6 +169,7 @@ public:
     [[nodiscard]] inline uint32_t max_actions_per_step() const noexcept { return max_actions_per_step_; }
     [[nodiscard]] inline uint32_t max_events_per_step() const noexcept { return max_events_per_step_; }
     [[nodiscard]] inline uint32_t max_orders_per_agent() const noexcept { return max_orders_per_agent_; }
+    [[nodiscard]] inline uint32_t max_active_orders() const noexcept { return num_agents_ * max_orders_per_agent_; }
     [[nodiscard]] inline uint32_t obs_depth() const noexcept { return obs_depth_; }
 
     // --- Zero-Copy Tensor Pointers (For DLPack / Nanobind) ---
@@ -179,6 +181,7 @@ public:
     [[nodiscard]] inline float* lob_ptr() noexcept { return lob_ptr_; }
     [[nodiscard]] inline float* cash_ptr() noexcept { return cash_ptr_; }
     [[nodiscard]] inline float* inventory_ptr() noexcept { return inventory_ptr_; }
+    [[nodiscard]] inline uint64_t* event_cursors_ptr() noexcept { return event_cursors_ptr_; }
 
     // --- Resets ---
     void reset(const std::vector<uint32_t>& env_indices) noexcept;

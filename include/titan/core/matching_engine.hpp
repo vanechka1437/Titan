@@ -4,12 +4,10 @@
 #include <vector>
 
 #include "titan/core/lob_state.hpp"
+#include "titan/core/memory.hpp"
 #include "titan/core/types.hpp"
 
 namespace titan::core {
-
-// Forward declaration to prevent circular dependency with memory.hpp
-class OrderPoolAllocator;
 
 // ============================================================================
 // MATCHING ENGINE
@@ -36,6 +34,9 @@ public:
     // Disabled copying
     MatchingEngine(const MatchingEngine&) = delete;
     MatchingEngine& operator=(const MatchingEngine&) = delete;
+
+    MatchingEngine(MatchingEngine&&) noexcept = default;
+    MatchingEngine& operator=(MatchingEngine&&) noexcept = default;
 
     // 1. Process new Limit/Market Orders.
     // This function will check for spread crossing, call execute_trade() in a loop

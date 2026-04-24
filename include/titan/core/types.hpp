@@ -92,7 +92,7 @@ static_assert(sizeof(ActionPayload) == 32, "ActionPayload must be exactly 32 byt
 // 4. ZERO-COPY OUTPUTS (Market Data Events)
 // ============================================================================
 struct alignas(8) MarketDataEvent {
-    enum class Type : uint8_t { TRADE, LOB_UPDATE, ORDER_ACCEPTED, ORDER_REJECTED, CANCEL };
+    enum class Type : uint8_t { TRADE = 0, LOB_UPDATE = 1, CANCEL = 2, ACCEPTED = 3, REJECTED = 4 };
     
     OrderId order_id;     // 8 bytes
     OrderQty qty_delta;   // 8 bytes
