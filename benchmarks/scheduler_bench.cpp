@@ -19,30 +19,22 @@ using namespace titan::core;
 // 1. TYPE TRAITS & SFINAE DETECTORS
 // ============================================================================
 
-// Detector for Titan-style push: push(uint64_t, uint32_t)
+// Detector for Titan's raw 16-byte heap push: push(uint64_t, uint32_t)
 template <typename T, typename = void>
-struct has_titan_push : std::false_type {};
+struct has_titan_raw_push : std::false_type {};
 
 template <typename T>
-struct has_titan_push<T,
-                      std::void_t<decltype(std::declval<T>().push(std::declval<uint64_t>(), std::declval<uint32_t>()))>>
+struct has_titan_raw_push<T, std::void_t<decltype(std::declval<T>().push(std::declval<uint64_t>(), std::declval<uint32_t>()))>>
     : std::true_type {};
 
-// Detector for Boost D-Ary heaps (to differentiate from STL/Pairing)
-template <typename T>
-struct is_boost_dary : std::false_type {};
-
-template <uint32_t D, typename T, typename C>
-struct is_boost_dary<boost::heap::d_ary_heap<T, boost::heap::arity<D>, boost::heap::compare<C>>> : std::true_type {};
-
 // ============================================================================
-// 2. DISPATCHERS (Push & Factory)
+// 2. DISPATCHERS (Push & Factory for 16-byte raw heaps)
 // ============================================================================
 
 template <typename Scheduler>
 void do_push(Scheduler& heap, uint64_t time, uint32_t idx) {
-    if constexpr (has_titan_push<Scheduler>::value) {
-        // Our custom heaps and VectorSort
+    if constexpr (has_titan_raw_push<Scheduler>::value) {
+        // Titan FastDAryHeap
         heap.push(time, idx);
     } else {
         // std::priority_queue and Boost heaps
@@ -52,8 +44,8 @@ void do_push(Scheduler& heap, uint64_t time, uint32_t idx) {
 
 template <typename Scheduler>
 Scheduler create_scheduler(size_t capacity) {
-    if constexpr (has_titan_push<Scheduler>::value) {
-        // Custom heaps require pre-allocation
+    if constexpr (has_titan_raw_push<Scheduler>::value) {
+        // Custom Titan heaps require pre-allocation to guarantee no reallocs
         return Scheduler(capacity);
     } else {
         // Boost and STL containers use dynamic growth
@@ -65,9 +57,11 @@ Scheduler create_scheduler(size_t capacity) {
 // 3. COMPARATORS & INFRASTRUCTURE
 // ============================================================================
 
+// Key comparator for 16-byte struct
 struct MinHeapCompare {
     inline bool operator()(const HeapNode& a, const HeapNode& b) const noexcept {
-        return a.arrival_time > b.arrival_time;
+        if (a.arrival_time != b.arrival_time) return a.arrival_time > b.arrival_time;
+        return a.sequence_id > b.sequence_id;
     }
 };
 
@@ -77,32 +71,26 @@ using BoostPairingHeap = boost::heap::pairing_heap<HeapNode, boost::heap::compar
 template <uint32_t D>
 using BoostDAryHeap = boost::heap::d_ary_heap<HeapNode, boost::heap::arity<D>, boost::heap::compare<MinHeapCompare>>;
 
-// Challenger: Simple vector + postponed sort
-class VectorSortScheduler {
-private:
-    std::vector<HeapNode> data_;
-    bool is_sorted_{true};
+// ============================================================================
+// 4. THE ULTIMATE FAT-EVENT COMPARISON (16-byte keys vs 48-byte structs)
+// ============================================================================
 
-public:
-    explicit VectorSortScheduler(size_t cap) { data_.reserve(cap); }
-    inline void push(uint64_t t, uint32_t p) noexcept {
-        data_.push_back({t, p, 0});
-        is_sorted_ = false;
+// Comparator for the full 48-byte struct directly inside std::priority_queue
+struct FatEventCompare {
+    inline bool operator()(const ScheduledEvent& a, const ScheduledEvent& b) const noexcept {
+        return a.time > b.time;
     }
-    inline const HeapNode& top() noexcept {
-        if (!is_sorted_) {
-            std::sort(data_.begin(), data_.end(),
-                      [](const HeapNode& a, const HeapNode& b) { return a.arrival_time > b.arrival_time; });
-            is_sorted_ = true;
-        }
-        return data_.back();
-    }
-    inline void pop() noexcept { data_.pop_back(); }
-    inline bool empty() const noexcept { return data_.empty(); }
 };
 
+using StdFatQueue = std::priority_queue<ScheduledEvent, std::vector<ScheduledEvent>, FatEventCompare>;
+
+template <typename Scheduler>
+void do_fat_push(Scheduler& sched, uint64_t time, uint32_t target) {
+    sched.push(ScheduledEvent::make_agent_wakeup(time, target));
+}
+
 // ============================================================================
-// 4. BENCHMARK SCENARIOS
+// 5. BENCHMARK SCENARIOS (Raw Keys)
 // ============================================================================
 
 template <class Scheduler>
@@ -110,8 +98,7 @@ void BM_Burst(benchmark::State& state) {
     const size_t batch_size = state.range(0);
     std::mt19937_64 gen(42);
     std::vector<uint64_t> times(batch_size);
-    for (auto& t : times)
-        t = gen();
+    for (auto& t : times) t = gen();
 
     for (auto _ : state) {
         auto heap = create_scheduler<Scheduler>(batch_size);
@@ -144,36 +131,88 @@ void BM_Churn(benchmark::State& state) {
 }
 
 // ============================================================================
-// 5. REGISTRATION MATRIX
+// 6. BENCHMARK SCENARIOS (Fat Events: Cache Thrashing Test)
 // ============================================================================
 
-#define REGISTER_RANGE(CLASS, NAME)                                                               \
-    BENCHMARK(BM_Churn<CLASS>)->Name("Churn_" NAME)->RangeMultiplier(8)->Range(128, 1024 * 1024); \
-    BENCHMARK(BM_Burst<CLASS>)->Name("Burst_" NAME)->RangeMultiplier(8)->Range(128, 1024 * 1024);
+template <class Scheduler>
+void BM_FatChurn(benchmark::State& state) {
+    const size_t queue_depth = state.range(0);
+    std::mt19937_64 gen(1337);
+    
+    // Allocate Memory
+    alignas(64) std::byte buffer[sizeof(Scheduler)];
+    Scheduler* sched_ptr;
+    
+    if constexpr (std::is_same_v<Scheduler, FastScheduler>) {
+        sched_ptr = new (buffer) Scheduler(queue_depth + 1);
+    } else {
+        sched_ptr = new (buffer) Scheduler();
+    }
+    
+    Scheduler& sched = *sched_ptr;
 
-// Baselines
-REGISTER_RANGE(StdBinaryHeap, "Std_Binary");
-REGISTER_RANGE(BoostPairingHeap, "Boost_Pairing");
-REGISTER_RANGE(VectorSortScheduler, "Challenger_VectorSort");
+    // Fill Queue
+    for (size_t i = 0; i < queue_depth; ++i) {
+        do_fat_push(sched, gen() % 1000000, (uint32_t)i);
+    }
 
-// Boost D-Ary
-REGISTER_RANGE(BoostDAryHeap<4>, "Boost_D4");
-REGISTER_RANGE(BoostDAryHeap<8>, "Boost_D8");
-REGISTER_RANGE(BoostDAryHeap<16>, "Boost_D16");
+    // Steady State Churn
+    for (auto _ : state) {
+        auto current = sched.top();
+        sched.pop();
+        benchmark::DoNotOptimize(current);
+        uint64_t next_time = current.time + (gen() % 5000);
+        do_fat_push(sched, next_time, current.target_id);
+    }
+    
+    sched_ptr->~Scheduler();
+}
 
-// Titan Hand-Tuned Templates
-REGISTER_RANGE(FastDAryHeap<2>, "Titan_D2");
-REGISTER_RANGE(FastDAryHeap<4>, "Titan_D4");
-REGISTER_RANGE(FastDAryHeap<8>, "Titan_D8");
-REGISTER_RANGE(FastDAryHeap<16>, "Titan_D16");
-REGISTER_RANGE(FastDAryHeap<32>, "Titan_D32");
-REGISTER_RANGE(FastDAryHeap<64>, "Titan_D64");
+// ============================================================================
+// 7. REGISTRATION MATRIX
+// ============================================================================
 
+#define REGISTER_RAW(CLASS, NAME)                                                   \
+    BENCHMARK(BM_Churn<CLASS>)->Name("RawChurn_" NAME)->RangeMultiplier(8)->Range(128, 1024 * 1024); \
+    BENCHMARK(BM_Burst<CLASS>)->Name("RawBurst_" NAME)->RangeMultiplier(8)->Range(128, 1024 * 1024);
+
+#define REGISTER_FAT(CLASS, NAME)                                                   \
+    BENCHMARK(BM_FatChurn<CLASS>)->Name("FatChurn_" NAME)->RangeMultiplier(8)->Range(128, 1024 * 1024);
+
+// ----------------------------------------------------------------------------
+// GROUP 1: Raw 16-byte Key Performance (CPU Sorting Efficiency)
+// ----------------------------------------------------------------------------
+
+// C++ STL Baseline
+REGISTER_RAW(StdBinaryHeap, "Std_Binary_PQ");
+
+// Boost Library Challengers
+REGISTER_RAW(BoostPairingHeap, "Boost_Pairing");
+REGISTER_RAW(BoostDAryHeap<4>, "Boost_D4");
+REGISTER_RAW(BoostDAryHeap<8>, "Boost_D8");
+
+// Titan HFT Custom Heaps
+REGISTER_RAW(FastDAryHeap<2>, "Titan_D2");
+REGISTER_RAW(FastDAryHeap<4>, "Titan_D4");
+REGISTER_RAW(FastDAryHeap<8>, "Titan_D8");
+REGISTER_RAW(FastDAryHeap<16>, "Titan_D16");
+
+// ----------------------------------------------------------------------------
+// GROUP 2: The Fat Payload Cache Test (16-byte + Pool vs 48-byte Direct Sort)
+// ----------------------------------------------------------------------------
+
+REGISTER_FAT(StdFatQueue, "Std_Fat_48Byte_PQ");
+REGISTER_FAT(FastScheduler, "Titan_Separated_Pool");
+
+// ============================================================================
+// ENTRY POINT
+// ============================================================================
 int main(int argc, char** argv) {
     ::benchmark::Initialize(&argc, argv);
     std::cout << "-----------------------------------------------------------\n";
     std::cout << "TITAN SCHEDULER CROSS-ARITY HARDWARE SEARCH\n";
     std::cout << "Testing optimal D-factor for L1/L2 cache prefetching.\n";
+    std::cout << "Testing Fat-Event cache fragmentation.\n";
     std::cout << "-----------------------------------------------------------\n";
     ::benchmark::RunSpecifiedBenchmarks();
     return 0;
