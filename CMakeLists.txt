@@ -195,6 +195,8 @@ FetchContent_MakeAvailable(nanobind)
 # ==============================================================================
 add_library(titan_core STATIC)
 
+set_target_properties(titan_core PROPERTIES OUTPUT_NAME titan_core_static)
+
 target_include_directories(titan_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
