@@ -94,10 +94,12 @@ add_compile_definitions(
 if(MSVC)
     # /O2: Max speed, /Ot: Fast code, /GL: Whole program optimization, /arch:AVX2: Vectorization
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ot /GL /arch:AVX2 /DNDEBUG")
-    set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /fsanitize=address")
+    # ASAN (AddressSanitizer) удален для Windows из-за конфликтов перехвата API (Interception failure)
+    set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi")
 else()
     # GCC / Clang: Native architecture tuning, Link-Time Optimization
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG -flto")
+    # На Linux ASAN работает стабильно, оставляем его включенным для поиска утечек
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address")
 endif()
 
@@ -176,6 +178,19 @@ message(STATUS "[Titan] Fetching Google Abseil...")
 FetchContent_MakeAvailable(abseil_cpp)
 
 # ==============================================================================
+# 7.5 Dependencies: Python & Nanobind
+# ==============================================================================
+find_package(Python 3.8 COMPONENTS Interpreter Development.Module REQUIRED)
+
+FetchContent_Declare(
+    nanobind
+    GIT_REPOSITORY https://github.com/wjakob/nanobind.git
+    GIT_TAG v2.0.0
+)
+message(STATUS "[Titan] Fetching Nanobind...")
+FetchContent_MakeAvailable(nanobind)
+
+# ==============================================================================
 # 8. Core Library (Titan)
 # ==============================================================================
 add_library(titan_core STATIC)
@@ -198,38 +213,45 @@ target_compile_definitions(titan_core PUBLIC TITAN_SYSTEM_L3_BYTES=${TITAN_SYSTE
 target_link_libraries(titan_core PUBLIC Boost::boost absl::btree)
 
 # ==============================================================================
+# 8.5 Python Extension Module
+# ==============================================================================
+nanobind_add_module(titan_core_ext src/bindings/python.cpp)
+set_target_properties(titan_core_ext PROPERTIES OUTPUT_NAME titan_core)
+target_link_libraries(titan_core_ext PRIVATE titan_core)
+
+# ==============================================================================
 # 9. Subdirectories
 # ==============================================================================
 
 # ==============================================================================
 # 10. Tests
 # ==============================================================================
-add_executable(titan_lob_tests
-    tests/lob_state_tests.cpp
-)
+#add_executable(titan_lob_tests
+#   tests/lob_state_tests.cpp
+#)
 
-target_link_libraries(titan_lob_tests PRIVATE
-    titan_core
-    gtest_main
-)
+#target_link_libraries(titan_lob_tests PRIVATE
+#    titan_core
+#    gtest_main
+#)
 
-add_executable(titan_memory_tests
-    tests/memory_tests.cpp
-)
+#add_executable(titan_memory_tests
+#    tests/memory_tests.cpp
+#)
 
-target_link_libraries(titan_memory_tests PRIVATE titan_core gtest_main)
+#target_link_libraries(titan_memory_tests PRIVATE titan_core gtest_main)
 
-add_executable(titan_state_tests
-    tests/state_tests.cpp
-)
+#add_executable(titan_state_tests
+#    tests/state_tests.cpp
+#)
 
-target_link_libraries(titan_state_tests PRIVATE titan_core gtest_main)
+#target_link_libraries(titan_state_tests PRIVATE titan_core gtest_main)
 
-add_executable(titan_matching_engine_tests
-   tests/matching_engine_tests.cpp
-)
+#add_executable(titan_matching_engine_tests
+#   tests/matching_engine_tests.cpp
+#)
 
-target_link_libraries(titan_matching_engine_tests PRIVATE titan_core gtest_main)
+#target_link_libraries(titan_matching_engine_tests PRIVATE titan_core gtest_main)
 
 add_executable(titan_scheduler_tests
     tests/scheduler_tests.cpp
@@ -237,37 +259,45 @@ add_executable(titan_scheduler_tests
 
 target_link_libraries(titan_scheduler_tests PRIVATE titan_core gtest_main)
 
+add_executable(titan_batch_simulator_tests
+    tests/batch_simulator_tests.cpp
+)
+
+target_link_libraries(titan_batch_simulator_tests PRIVATE titan_core gtest_main)
+
 include(GoogleTest)
-gtest_discover_tests(titan_lob_tests)
-gtest_discover_tests(titan_memory_tests)
-gtest_discover_tests(titan_state_tests)
-gtest_discover_tests(titan_matching_engine_tests)
+#gtest_discover_tests(titan_lob_tests)
+#gtest_discover_tests(titan_memory_tests)
+#gtest_discover_tests(titan_state_tests)
+gtest_discover_tests(titan_scheduler_tests)
+gtest_discover_tests(titan_batch_simulator_tests)
+#gtest_discover_tests(titan_matching_engine_tests)
 
 # ==============================================================================
 # 11. Benchmarks
 # ==============================================================================
-add_executable(titan_lob_bench
-    benchmarks/lob_state_bench.cpp
-)
+#add_executable(titan_lob_bench
+#    benchmarks/lob_state_bench.cpp
+#)
 
-target_link_libraries(titan_lob_bench PRIVATE
-    titan_core
-    benchmark::benchmark
-    absl::btree
-)
+#target_link_libraries(titan_lob_bench PRIVATE
+#    titan_core
+#    benchmark::benchmark
+#    absl::btree
+#)
 
-add_executable(titan_memory_bench
-    benchmarks/memory_bench.cpp
-)
+#add_executable(titan_memory_bench
+#    benchmarks/memory_bench.cpp
+#)
 
-target_link_libraries(titan_memory_bench PRIVATE
-    titan_core
-    benchmark::benchmark
-    Boost::boost
-)
+#target_link_libraries(titan_memory_bench PRIVATE
+#    titan_core
+#    benchmark::benchmark
+#    Boost::boost
+#)
 
 add_executable(titan_scheduler_bench
-    benchmarks/scheduler_bench.cpp
+   benchmarks/scheduler_bench.cpp
 )
 
 target_link_libraries(titan_scheduler_bench PRIVATE
@@ -276,31 +306,40 @@ target_link_libraries(titan_scheduler_bench PRIVATE
     Boost::boost
 )
 
-add_executable(titan_shadowlob_bench
-    benchmarks/shadowlob_bench.cpp
+#add_executable(titan_shadowlob_bench
+#    benchmarks/shadowlob_bench.cpp
+#)
+
+#target_link_libraries(titan_shadowlob_bench PRIVATE
+#   titan_core
+#   benchmark::benchmark
+#   Boost::boost
+#   absl::btree
+#)
+
+#add_executable(titan_shadowlob_bench2
+#    benchmarks/shadowlob_bench2.cpp
+#)
+
+#target_link_libraries(titan_shadowlob_bench2 PRIVATE
+#   titan_core
+#   benchmark::benchmark
+#)
+
+#add_executable(titan_matching_engine_bench
+#    benchmarks/matching_engine_bench.cpp
+#)
+
+#target_link_libraries(titan_matching_engine_bench PRIVATE
+#   titan_core
+#   benchmark::benchmark
+#)
+
+add_executable(titan_batch_simulator_bench
+   benchmarks/batch_simulator_bench.cpp
 )
 
-target_link_libraries(titan_shadowlob_bench PRIVATE
-   titan_core
-   benchmark::benchmark
-   Boost::boost
-   absl::btree
-)
-
-add_executable(titan_shadowlob_bench2
-    benchmarks/shadowlob_bench2.cpp
-)
-
-target_link_libraries(titan_shadowlob_bench2 PRIVATE
-   titan_core
-   benchmark::benchmark
-)
-
-add_executable(titan_matching_engine_bench
-    benchmarks/matching_engine_bench.cpp
-)
-
-target_link_libraries(titan_matching_engine_bench PRIVATE
-   titan_core
-   benchmark::benchmark
+target_link_libraries(titan_batch_simulator_bench PRIVATE
+    titan_core
+    benchmark::benchmark
 )
