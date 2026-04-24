@@ -216,6 +216,14 @@ UnifiedMemoryArena::~UnifiedMemoryArena() {
 void UnifiedMemoryArena::reset(const std::vector<uint32_t>& env_indices) noexcept {
     // Partial reset for specific environments
     for (const uint32_t env_idx : env_indices) {
+        
+        // --- SECURITY PATCH: OOB Memory Protection ---
+        // Prevents malicious or hallucinating Python agents from corrupting 
+        // memory outside the allocated Arena bounds.
+        if (env_idx >= num_envs_) [[unlikely]] {
+            continue; 
+        }
+
         pools_[env_idx].reset();
 
         // Size calculation for single environment slices

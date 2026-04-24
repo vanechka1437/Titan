@@ -248,6 +248,13 @@ void BatchSimulator<ObsDepth>::reset(const std::vector<uint32_t>& env_indices) n
     arena_->reset(env_indices);
 
     for (uint32_t env_id : env_indices) {
+        
+        // --- SECURITY PATCH: OOB Memory Protection ---
+        // Protects the std::vector elements and atomic flags from invalid indices
+        if (env_id >= num_envs_) [[unlikely]] {
+            continue;
+        }
+
         env_paused_[env_id].store(true, std::memory_order_relaxed); 
         
         envs_[env_id].reset();
