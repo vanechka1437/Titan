@@ -29,9 +29,6 @@ NB_MODULE(titan_core, m) {
 
     // ========================================================================
     // 1. UNIFIED MEMORY ARENA (The Master Data Structure)
-    // The Python layer explicitly instantiates and owns the master memory block.
-    // This perfectly mirrors the C++ Data-Oriented architecture and ensures 
-    // the Python Garbage Collector preserves the memory while PyTorch holds tensors.
     // ========================================================================
     nb::class_<UnifiedMemoryArena>(m, "MemoryArena")
         .def(nb::init<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::size_t>(),
@@ -47,8 +44,6 @@ NB_MODULE(titan_core, m) {
              
         // --------------------------------------------------------------------
         // ZERO-COPY TENSOR EXPORTS (Anchored to the Arena's lifetime)
-        // nb::cast with rv_policy::reference ensures PyTorch references 
-        // the raw C++ memory securely without invoking costly array copies.
         // --------------------------------------------------------------------
         
         // Shape: [num_envs, num_agents] -> uint8_t
@@ -58,14 +53,19 @@ NB_MODULE(titan_core, m) {
         })
         
         // Shape: [num_envs, max_actions_per_step, 4] -> int64_t
-        // Safely maps the 32-byte ActionPayload struct into 4 contiguous int64_t primitives.
         .def_prop_ro("actions", [](UnifiedMemoryArena& a) {
             size_t shape[3] = { static_cast<size_t>(a.num_envs()), static_cast<size_t>(a.max_actions_per_step()), 4 };
             return ZeroCopyTensor3D<int64_t>(reinterpret_cast<int64_t*>(a.actions_ptr()), 3, shape, nb::cast(&a, nb::rv_policy::reference));
         })
+
+        // Shape: [num_envs, max_events_per_step, 4] -> int64_t
+        // Safely maps the 32-byte MarketDataEvent struct into 4 contiguous int64_t primitives.
+        .def_prop_ro("events", [](UnifiedMemoryArena& a) {
+            size_t shape[3] = { static_cast<size_t>(a.num_envs()), static_cast<size_t>(a.max_events_per_step()), 4 };
+            return ZeroCopyTensor3D<int64_t>(reinterpret_cast<int64_t*>(a.events_ptr()), 3, shape, nb::cast(&a, nb::rv_policy::reference));
+        })
         
         // Shape: [num_envs, max_active_orders, 2] -> int64_t
-        // Maps the 16-byte ActiveOrderRecord struct into 2 contiguous int64_t primitives.
         .def_prop_ro("active_orders", [](UnifiedMemoryArena& a) {
             size_t shape[3] = { static_cast<size_t>(a.num_envs()), static_cast<size_t>(a.max_active_orders()), 2 };
             return ZeroCopyTensor3D<int64_t>(reinterpret_cast<int64_t*>(a.active_orders_ptr()), 3, shape, nb::cast(&a, nb::rv_policy::reference));
@@ -101,7 +101,6 @@ NB_MODULE(titan_core, m) {
 
     // ========================================================================
     // 2. BATCH SIMULATOR (The Execution Engine)
-    // Runs the multi-threaded physics calculations over the Arena's memory.
     // ========================================================================
     using Sim = BatchSimulator<DEFAULT_OBS_DEPTH>;
 
@@ -110,42 +109,47 @@ NB_MODULE(titan_core, m) {
              nb::arg("arena").none(false),
              nb::arg("target_batch_size"),
              nb::arg("num_threads"),
-             // CRITICAL SAFETY MECHANISM: keep_alive<1, 2>() rigidly links the 
-             // Simulator's lifecycle (arg 1) to the Arena (arg 2). This ensures 
-             // Python cannot garbage collect the memory while threads are active.
              nb::keep_alive<1, 2>(), 
              "Initializes the asynchronous HFT Discrete Event Simulator.")
 
         // --------------------------------------------------------------------
         // LIFECYCLE & EXECUTION CONTROLS 
-        // GIL is strictly dropped (gil_scoped_release) during execution to 
-        // permit true concurrent scaling between Python backprop and C++ physics.
         // --------------------------------------------------------------------
         .def("start", &Sim::start, 
-             nb::call_guard<nb::gil_scoped_release>(),
-             "Ignites the C++ worker thread pool.")
+             nb::call_guard<nb::gil_scoped_release>())
              
         .def("stop", &Sim::stop, 
-             nb::call_guard<nb::gil_scoped_release>(),
-             "Safely joins the background thread pool and halts the engine.")
+             nb::call_guard<nb::gil_scoped_release>())
         
         .def("resume_batch", &Sim::resume_batch,
-             nb::call_guard<nb::gil_scoped_release>(), 
-             "Notifies the C++ engine to ingest new RL actions from memory and resume physics.")
+             nb::call_guard<nb::gil_scoped_release>())
         
         .def("wait_for_batch", &Sim::wait_for_batch,
-             nb::call_guard<nb::gil_scoped_release>(), 
-             "Blocks the Python execution thread until 'target_batch_size' agents require inference.")
+             nb::call_guard<nb::gil_scoped_release>())
+             
+        // --------------------------------------------------------------------
+        // DYNAMIC STATE EXPORTS
+        // --------------------------------------------------------------------
+        
+        // Shape: [num_envs] -> uint64_t
+        // Dynamically copies the environment clock since it is interleaved memory in C++
+        .def("get_current_times", [](Sim& sim, uint32_t num_envs) {
+            uint64_t* data = new uint64_t[num_envs];
+            for (uint32_t i = 0; i < num_envs; ++i) {
+                data[i] = sim.get_env(i).current_time;
+            }
+            size_t shape[1] = { num_envs };
+            nb::capsule owner(data, [](void *p) noexcept { delete[] (uint64_t *) p; });
+            return ZeroCopyTensor1D<uint64_t>(data, 1, shape, owner);
+        }, nb::arg("num_envs"), "Returns a dynamically allocated 1D tensor of current environment timestamps.")
         
         // --------------------------------------------------------------------
         // VECTORIZED AUTO-RESETS
         // --------------------------------------------------------------------
         .def("reset_all", &Sim::reset_all, 
-             nb::call_guard<nb::gil_scoped_release>(),
-             "Global flush: instantaneously wipes all memory boundaries to step 0.")
+             nb::call_guard<nb::gil_scoped_release>())
         
         .def("reset", &Sim::reset, 
              nb::arg("env_indices"), 
-             nb::call_guard<nb::gil_scoped_release>(),
-             "Targeted reset: Wipes states exclusively for terminated environments (O(1) episode reset).");
+             nb::call_guard<nb::gil_scoped_release>());
 }
