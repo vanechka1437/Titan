@@ -1,7 +1,7 @@
 import torch
 from dataclasses import dataclass
 
-from titan.agents.base import BaseAgent # type: ignore
+from titan.agents.base_agent import BaseAgent # type: ignore
 from titan.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView, EventType # type: ignore
 from titan.core.actions import ActionBuilder, Side, TimeInForce # type: ignore
 from titan.core.distributions import Distribution  # type: ignore

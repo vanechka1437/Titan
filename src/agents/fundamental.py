@@ -2,7 +2,7 @@ import torch
 import math
 from dataclasses import dataclass
 
-from titan.agents.base import BaseAgent # type: ignore
+from titan.agents.base_agent import BaseAgent # type: ignore
 from titan.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView # type: ignore
 from titan.core.actions import ActionBuilder, Side # type: ignore
 from titan.core.distributions import Distribution # type: ignore
