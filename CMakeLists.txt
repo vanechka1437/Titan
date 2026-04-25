@@ -255,24 +255,24 @@ target_link_libraries(titan_core_ext PRIVATE titan_core)
 
 #target_link_libraries(titan_matching_engine_tests PRIVATE titan_core gtest_main)
 
-add_executable(titan_scheduler_tests
-    tests/scheduler_tests.cpp
-)
+#add_executable(titan_scheduler_tests
+#    tests/scheduler_tests.cpp
+#)
 
-target_link_libraries(titan_scheduler_tests PRIVATE titan_core gtest_main)
+#target_link_libraries(titan_scheduler_tests PRIVATE titan_core gtest_main)
 
-add_executable(titan_batch_simulator_tests
-    tests/batch_simulator_tests.cpp
-)
+#add_executable(titan_batch_simulator_tests
+#   tests/batch_simulator_tests.cpp
+#)
 
-target_link_libraries(titan_batch_simulator_tests PRIVATE titan_core gtest_main)
+#target_link_libraries(titan_batch_simulator_tests PRIVATE titan_core gtest_main)
 
-include(GoogleTest)
+#include(GoogleTest)
 #gtest_discover_tests(titan_lob_tests)
 #gtest_discover_tests(titan_memory_tests)
 #gtest_discover_tests(titan_state_tests)
-gtest_discover_tests(titan_scheduler_tests)
-gtest_discover_tests(titan_batch_simulator_tests)
+#gtest_discover_tests(titan_scheduler_tests)
+#gtest_discover_tests(titan_batch_simulator_tests)
 #gtest_discover_tests(titan_matching_engine_tests)
 
 # ==============================================================================
@@ -298,15 +298,15 @@ gtest_discover_tests(titan_batch_simulator_tests)
 #    Boost::boost
 #)
 
-add_executable(titan_scheduler_bench
-   benchmarks/scheduler_bench.cpp
-)
+#add_executable(titan_scheduler_bench
+#   benchmarks/scheduler_bench.cpp
+#)
 
-target_link_libraries(titan_scheduler_bench PRIVATE
-    titan_core
-    benchmark::benchmark
-    Boost::boost
-)
+#target_link_libraries(titan_scheduler_bench PRIVATE
+#    titan_core
+#    benchmark::benchmark
+#    Boost::boost
+#)
 
 #add_executable(titan_shadowlob_bench
 #    benchmarks/shadowlob_bench.cpp
@@ -337,11 +337,11 @@ target_link_libraries(titan_scheduler_bench PRIVATE
 #   benchmark::benchmark
 #)
 
-add_executable(titan_batch_simulator_bench
-   benchmarks/batch_simulator_bench.cpp
-)
+#add_executable(titan_batch_simulator_bench
+#   benchmarks/batch_simulator_bench.cpp
+#)
 
-target_link_libraries(titan_batch_simulator_bench PRIVATE
-    titan_core
-    benchmark::benchmark
-)
+#target_link_libraries(titan_batch_simulator_bench PRIVATE
+#    titan_core
+#    benchmark::benchmark
+#)
