@@ -28,6 +28,15 @@ if(CMAKE_HOST_WIN32)
         math(EXPR L3_BYTES "${L3_MB} * 1024 * 1024")
     endif()
 
+    # --- Windows L2 Cache ---
+    # wmic returns L2 cache size in Kilobytes
+    execute_process(COMMAND wmic cpu get L2CacheSize OUTPUT_VARIABLE WMIC_L2_OUTPUT ERROR_QUIET)
+    string(REGEX MATCHALL "[0-9]+" L2_KB_LIST "${WMIC_L2_OUTPUT}")
+    list(GET L2_KB_LIST 0 L2_KB)
+    if(L2_KB)
+        math(EXPR L2_BYTES "${L2_KB} * 1024")
+    endif()
+
     # --- Windows L1 Data Cache ---
     # wmic cpu doesn't expose L1 directly. Using PowerShell to query Win32_CacheMemory (Level 3 = L1). 
     # MaxCacheSize is returned in Kilobytes.
@@ -46,6 +55,7 @@ elseif(CMAKE_HOST_UNIX)
         # --- macOS ---
         # sysctl returns values directly in Bytes
         execute_process(COMMAND sysctl -n hw.l3cachesize OUTPUT_VARIABLE L3_BYTES ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+        execute_process(COMMAND sysctl -n hw.l2cachesize OUTPUT_VARIABLE L2_BYTES ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
         execute_process(COMMAND sysctl -n hw.l1dcachesize OUTPUT_VARIABLE L1_BYTES ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
     else()
         # --- Linux ---
@@ -53,6 +63,11 @@ elseif(CMAKE_HOST_UNIX)
         execute_process(COMMAND getconf LEVEL3_CACHE_SIZE OUTPUT_VARIABLE GETCONF_L3 ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
         if(GETCONF_L3 MATCHES "^[0-9]+$")
             set(L3_BYTES ${GETCONF_L3})
+        endif()
+
+        execute_process(COMMAND getconf LEVEL2_CACHE_SIZE OUTPUT_VARIABLE GETCONF_L2 ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(GETCONF_L2 MATCHES "^[0-9]+$")
+            set(L2_BYTES ${GETCONF_L2})
         endif()
 
         execute_process(COMMAND getconf LEVEL1_DCACHE_SIZE OUTPUT_VARIABLE GETCONF_L1 ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)

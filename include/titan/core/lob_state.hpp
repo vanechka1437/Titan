@@ -9,8 +9,8 @@
 #include "titan/core/types.hpp"
 
 // Fallback configuration if CMake fails to provide the hardware profile
-#ifndef TITAN_SYSTEM_L3_BYTES
-#define TITAN_SYSTEM_L3_BYTES (16ull * 1024 * 1024)  // 16 MB
+#ifndef TITAN_SYSTEM_L2_BYTES
+#define TITAN_SYSTEM_L2_BYTES (1024ull * 1024)  // 1 MB (Typical L2 cache per core)
 #endif
 
 #include <absl/container/btree_map.h>
@@ -41,19 +41,21 @@ static_assert(sizeof(PriceLevel) == 32, "PriceLevel must be exactly 32 bytes for
 // ============================================================================
 // Compile-Time Hardware Optimization (Zero Runtime Overhead)
 // ============================================================================
-namespace detail {
-// 1. Allocate 1/8th of the L3 Cache to the Hot Zone
-constexpr size_t TARGET_MEMORY_BYTES = TITAN_SYSTEM_L3_BYTES / 8;
 
-// 2. Calculate capacity based on struct size
-// (Automatically scales down since PriceLevel is now 32 bytes)
+namespace detail {
+// 1. Allocate 1/4th of the L2 Cache to the Hot Zone
+// (This ensures the ring buffer stays ultra-fast and doesn't pollute the entire cache)
+constexpr size_t TARGET_MEMORY_BYTES = TITAN_SYSTEM_L2_BYTES / 4;
+
+// 2. Calculate capacity based on struct size (32 bytes)
+// Example: 256 KB / 32 bytes = 8192 levels
 constexpr size_t TARGET_LEVELS = TARGET_MEMORY_BYTES / sizeof(PriceLevel);
 
-// 3. Floor to nearest power of 2 for fast bitwise arithmetic
+// 3. Floor to nearest power of 2 for fast bitwise arithmetic (price & RING_MASK)
 constexpr size_t OPTIMAL_RING = std::bit_floor(TARGET_LEVELS);
 
-// 4. Safety bounds: Min 256 KB (L2 Cache), Max 8 MB
-constexpr size_t FINAL_RING_SIZE = std::clamp<size_t>(OPTIMAL_RING, 16384, 524288);
+// 4. Safety bounds: Min 1024 (L1 Cache limit), Max 65536
+constexpr size_t FINAL_RING_SIZE = std::clamp<size_t>(OPTIMAL_RING, 1024, 65536);
 }  // namespace detail
 
 // ============================================================================
