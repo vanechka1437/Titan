@@ -176,7 +176,7 @@ public:
 
     [[nodiscard]] Price get_anchor_price() const noexcept { return anchor_price_; }
 
-    inline void reduce_level_qty(uint8_t side, Price price, OrderQty trade_qty) noexcept;
+    void reduce_level_qty(uint8_t side, Price price, OrderQty trade_qty) noexcept;
 
     // Instant reset for RL episodes
     void reset() noexcept;
