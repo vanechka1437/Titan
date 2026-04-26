@@ -3,110 +3,148 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from IPython.display import HTML
-
-from Titan.src.core.views import ShadowLOBView 
+from typing import Optional
 
 class LOBAnimator:
     """
-    Offline Visualizer for Google Colab.
-    Captures LOB snapshots during the high-frequency simulation loop with minimal overhead,
-    and renders an interactive HTML5 video animation after the simulation ends.
+    Professional-grade Limit Order Book (LOB) Visualizer mimicking a High-Frequency 
+    Broker Terminal (e.g., Interactive Brokers TWS / TradingView).
+
+    Engineered for the Titan Digital Twin to resolve asynchronous latency artifacts
+    and provide high-fidelity market depth surveillance.
     """
-    def __init__(self, tick_size: float, num_levels: int = 10):
+    def __init__(self, tick_size: float, num_levels: int = 15):
         self.tick_size = tick_size
         self.num_levels = num_levels
-        
-        # Memory buffers for captured frames
         self.frames_bids = []
         self.frames_asks = []
         self.frames_mids = []
-
-    def capture_frame(self, lob: ShadowLOBView, env_idx: int = 0) -> None:
-        """
-        Takes a microsecond-fast snapshot of the LOB for a specific environment.
-        Call this inside your main simulation loop (e.g., every 10 steps to save RAM).
-        """
-        # Extract data for a single environment, agent 0 (public LOB view)
-        # lob._reshaped shape: [num_envs, num_agents, depth, 4]
-        raw_lob = lob._reshaped[env_idx, 0]
         
-        # Convert to CPU numpy arrays for Matplotlib (only slicing the needed levels)
+        # Professional Broker Terminal Color Palette
+        self.COLOR_BG   = '#0B0E11'  # Deep Slate / Dark mode
+        self.COLOR_GRID = '#23272E'  # Subtle dark grid
+        self.COLOR_BID  = '#00C076'  # Emerald Green (Success)
+        self.COLOR_ASK  = '#FF3B30'  # High-Intensity Red (Danger)
+        self.COLOR_MID  = '#F0B90B'  # Gold / Highlight
+        self.COLOR_TEXT = '#EAECEF'  # High-readability white/gray
+
+    def capture_frame(self, 
+                      lob, 
+                      env_idx: int = 0, 
+                      agent_idx: int = 0, 
+                      clean_book: bool = True) -> None:
+        """
+        Captures a synchronized snapshot of the LOB from a specific agent's perspective.
+        
+        Args:
+            lob: ShadowLOBView instance.
+            env_idx: Parallel environment index.
+            agent_idx: Target agent ID (determines the network latency view).
+            clean_book: If True, applies 'Broker Smoothing' to resolve latency-induced artifacts.
+        """
+        # ShadowLOB memory layout: [envs, agents, depth, 4] -> [price_bid, qty_bid, price_ask, qty_ask]
+        raw_lob = lob._reshaped[env_idx, agent_idx]
+        
+        # Optimized vectorized extraction to CPU
         bids_price = (raw_lob[:self.num_levels, 0].float() * self.tick_size).cpu().numpy()
         bids_qty = raw_lob[:self.num_levels, 1].to(torch.int64).cpu().numpy()
         
         asks_price = (raw_lob[:self.num_levels, 2].float() * self.tick_size).cpu().numpy()
         asks_qty = raw_lob[:self.num_levels, 3].to(torch.int64).cpu().numpy()
         
-        self.frames_bids.append(np.column_stack((bids_price, bids_qty)))
-        self.frames_asks.append(np.column_stack((asks_price, asks_qty)))
+        # Initialize data stacks
+        bids = np.column_stack((bids_price[bids_qty > 0], bids_qty[bids_qty > 0]))
+        asks = np.column_stack((asks_price[asks_qty > 0], asks_qty[asks_qty > 0]))
         
-        # Calculate Mid-Price
-        best_bid = bids_price[0] if bids_qty[0] > 0 else 0.0
-        best_ask = asks_price[0] if asks_qty[0] > 0 else 0.0
-        mid = (best_bid + best_ask) / 2.0 if (best_bid > 0 and best_ask > 0) else 0.0
-        
-        self.frames_mids.append(mid)
+        # --- Advanced Broker Smoothing (Uncrossing) ---
+        # Mitigates 'Phantom Crosses' occurring when network packets for cancellations 
+        # arrive out-of-order relative to aggressive fills in the ShadowLOB.
+        if clean_book and len(bids) > 0 and len(asks) > 0:
+            best_bid = bids[0, 0]
+            best_ask = asks[0, 0]
+            if best_bid >= best_ask:
+                # Calculate the fair equilibrium point for visualization
+                mid_theoretical = (best_bid + best_ask) / 2.0
+                # Filter out orders that have crossed the theoretical mid
+                bids = bids[bids[:, 0] < mid_theoretical]
+                asks = asks[asks[:, 0] > mid_theoretical]
 
-    def generate_html_animation(self, interval: int = 100, width_mult: float = 0.8) -> HTML:
-        """
-        Compiles the captured frames into an HTML5 interactive video.
-        Returns an IPython HTML object that natively renders in Google Colab.
+        self.frames_bids.append(bids)
+        self.frames_asks.append(asks)
         
-        Args:
-            interval: Delay between frames in milliseconds.
-            width_mult: Controls the visual width of the bars relative to tick_size.
+        # Cache mid-price for line tracking
+        if len(bids) > 0 and len(asks) > 0:
+            self.frames_mids.append((bids[0, 0] + asks[0, 0]) / 2.0)
+        else:
+            self.frames_mids.append(0.0)
+
+    def generate_html_animation(self, interval: int = 200, dpi: int = 120) -> HTML:
+        """
+        Compiles the captured depth history into an interactive H5 animation.
         """
         if not self.frames_bids:
-            return HTML("<p>No frames captured.</p>")
+            return HTML("<div style='color:#FF3B30'>System Error: Buffer Empty. No frames captured.</div>")
 
-        fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+        fig, ax = plt.subplots(figsize=(11, 6), dpi=dpi)
+        fig.patch.set_facecolor(self.COLOR_BG)
         
-        def update(frame_idx):
+        def update(i):
             ax.clear()
-            bids = self.frames_bids[frame_idx]
-            asks = self.frames_asks[frame_idx]
-            mid = self.frames_mids[frame_idx]
+            ax.set_facecolor(self.COLOR_BG)
             
-            # Filter out empty price levels (qty == 0)
-            bids = bids[bids[:, 1] > 0]
-            asks = asks[asks[:, 1] > 0]
+            bids = self.frames_bids[i]
+            asks = self.frames_asks[i]
+            mid = self.frames_mids[i]
             
-            # Plot Bids (Green)
+            # 1. Render Depth Histogram
             if len(bids) > 0:
-                ax.bar(bids[:, 0], bids[:, 1], color='#2ca02c', width=self.tick_size * width_mult, alpha=0.8, label='Bids')
+                ax.bar(bids[:, 0], bids[:, 1], color=self.COLOR_BID, 
+                       width=self.tick_size * 0.9, alpha=0.85, label='BID DEPTH')
             
-            # Plot Asks (Red)
             if len(asks) > 0:
-                ax.bar(asks[:, 0], asks[:, 1], color='#d62728', width=self.tick_size * width_mult, alpha=0.8, label='Asks')
+                ax.bar(asks[:, 0], asks[:, 1], color=self.COLOR_ASK, 
+                       width=self.tick_size * 0.9, alpha=0.85, label='ASK DEPTH')
             
-            # Plot Mid-Price line
+            # 2. Render Vertical Price Tracking Line
             if mid > 0:
-                ax.axvline(x=mid, color='#1f77b4', linestyle='--', linewidth=2, label=f'Mid: {mid:.2f}')
+                ax.axvline(x=mid, color=self.COLOR_MID, linestyle='-', linewidth=1.5, 
+                           alpha=0.5, label=f'MID: {mid:.4f}')
             
-            # Formatting
-            ax.set_title(f'Titan LOB Dynamics | Step: {frame_idx}', fontsize=14, fontweight='bold')
-            ax.set_xlabel('Price', fontsize=12)
-            ax.set_ylabel('Liquidity (Volume)', fontsize=12)
-            ax.legend(loc='upper right')
-            ax.grid(True, alpha=0.3)
+            # 3. Dynamic Adaptive Constraints
+            # Prevents volume squashing during high-intensity liquidity events
+            max_vol = 100.0
+            if len(bids) > 0: max_vol = max(max_vol, bids[:, 1].max())
+            if len(asks) > 0: max_vol = max(max_vol, asks[:, 1].max())
+            ax.set_ylim(0, max_vol * 1.15)
             
-            # Dynamic X-axis scaling to follow the spread
+            # Centers camera on the active spread
             if len(bids) > 0 and len(asks) > 0:
-                min_price = bids[-1, 0] - (self.tick_size * 5)
-                max_price = asks[-1, 0] + (self.tick_size * 5)
-                ax.set_xlim(min_price, max_price)
+                x_min = bids[-1, 0] - (self.tick_size * 5)
+                x_max = asks[-1, 0] + (self.tick_size * 5)
+                ax.set_xlim(x_min, x_max)
+            
+            # 4. Professional Terminal Styling
+            ax.set_title(f"TITAN | BROKER TERMINAL | STEP {i}", loc='left', 
+                         fontsize=12, fontweight='bold', color=self.COLOR_TEXT, pad=15)
+            ax.set_ylabel("CONTRACTS / VOLUME", color=self.COLOR_TEXT, fontsize=9, fontweight='semibold')
+            ax.set_xlabel("PRICE (USD/TICKS)", color=self.COLOR_TEXT, fontsize=9, fontweight='semibold')
+            
+            ax.grid(True, which='major', axis='both', color=self.COLOR_GRID, linestyle='--', linewidth=0.5)
+            ax.tick_params(axis='both', colors=self.COLOR_TEXT, labelsize=8)
+            
+            # Remove container box
+            for spine in ax.spines.values():
+                spine.set_color(self.COLOR_GRID)
+                spine.set_alpha(0.3)
+            
+            # Professional Legend
+            legend = ax.legend(loc='upper right', frameon=True, fontsize=8)
+            legend.get_frame().set_facecolor(self.COLOR_BG)
+            legend.get_frame().set_edgecolor(self.COLOR_GRID)
+            legend.get_frame().set_alpha(0.8)
+            for text in legend.get_texts():
+                text.set_color(self.COLOR_TEXT)
 
-        # Create the animation
-        anim = animation.FuncAnimation(
-            fig, 
-            update, 
-            frames=len(self.frames_bids), 
-            interval=interval,
-            blit=False
-        )
-        
-        # Close the static figure so it doesn't print a duplicate empty chart in Colab
+        anim = animation.FuncAnimation(fig, update, frames=len(self.frames_bids), interval=interval)
         plt.close(fig)
-        
-        # Convert to Javascript HTML5 Video
         return HTML(anim.to_jshtml())
