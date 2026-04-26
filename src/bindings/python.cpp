@@ -162,5 +162,25 @@ NB_MODULE(titan_core, m) {
         
         .def("reset", &Sim::reset, 
              nb::arg("env_indices"), 
-             nb::call_guard<nb::gil_scoped_release>());
+             nb::call_guard<nb::gil_scoped_release>())
+
+        .def("inject_order", [](Sim& self, uint32_t env_idx, int32_t price, int64_t qty, int side) {
+            auto& env = self.get_env(env_idx);
+            
+            titan::core::ActionPayload ap; 
+            ap.action_type = 0; 
+            ap.price = static_cast<uint32_t>(price);
+            ap.qty = qty;
+            ap.side = static_cast<uint8_t>(side);
+            ap.agent_id = 0;
+            ap.target_id = 0;
+            
+            self.get_scheduler(env_idx).push(
+                titan::core::ScheduledEvent::make_order_arrival(
+                    env.current_time, 
+                    0, 
+                    ap
+                )
+            );
+        }, nb::arg("env_idx"), nb::arg("price"), nb::arg("qty"), nb::arg("side"));
 }
