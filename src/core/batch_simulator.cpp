@@ -139,7 +139,6 @@ void BatchSimulator<ObsDepth>::worker_loop(uint32_t thread_id) {
                         engine.process_order(event.target_id, event.action.side, event.action.price, event.action.qty, engine_events);
                     }
                     
-                    // Route resulting events to agents and update zero-copy history
                     for (const auto& ev : engine_events) {
                         uint64_t cursor = arena_->event_cursors_ptr()[env_id];
                         uint64_t ring_idx = cursor % arena_->max_events_per_step();
@@ -148,14 +147,9 @@ void BatchSimulator<ObsDepth>::worker_loop(uint32_t thread_id) {
                         arena_->events_ptr()[env_offset + ring_idx] = ev;
                         arena_->event_cursors_ptr()[env_id] = cursor + 1;
 
-                        // Route notification to Maker
-                        uint64_t maker_arrival_time = env.current_time + env.agents[ev.owner_id].egress_delay;
-                        scheduler.push(ScheduledEvent::make_market_data(maker_arrival_time, ev.owner_id, ev));
-                        
-                        // Route notification to Taker (if applicable)
-                        if (ev.type == MarketDataEvent::Type::TRADE && ev.taker_id != ev.owner_id) {
-                            uint64_t taker_arrival_time = env.current_time + env.agents[ev.taker_id].egress_delay;
-                            scheduler.push(ScheduledEvent::make_market_data(taker_arrival_time, ev.taker_id, ev));
+                        for (uint32_t a_id = 0; a_id < num_agents_per_env_; ++a_id) {
+                            uint64_t arrival_time = env.current_time + env.agents[a_id].egress_delay;
+                            scheduler.push(ScheduledEvent::make_market_data(arrival_time, a_id, ev));
                         }
                     }
                 }
