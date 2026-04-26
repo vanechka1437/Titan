@@ -58,7 +58,7 @@ class HawkesZITrader(BaseAgent):
             return
 
         mid_prices_float = lob.get_midprice(active_env_indices)
-        mid_prices_ticks = (mid_prices_float / lob.tick_size).to(torch.int64)
+        mid_prices_ticks = (mid_prices_float / lob.tick_size).to(torch.int64).view(-1)
         
         empty_lob_mask = (mid_prices_ticks == 0)
         mid_prices_ticks[empty_lob_mask] = self.config.default_price_ticks
