@@ -47,7 +47,7 @@ void MatchingEngine::process_order(OwnerId owner_id, uint8_t side, Price price, 
             Price best_ask = lob_.get_best_ask();
 
             // Spread check: If best ask is strictly greater than our buy limit, matching stops.
-            if (best_ask > price) {
+            if (best_ask > price && price != 0 && price != UINT32_MAX) {
                 break;
             }
 
@@ -91,7 +91,7 @@ void MatchingEngine::process_order(OwnerId owner_id, uint8_t side, Price price, 
             Price best_bid = lob_.get_best_bid();
 
             // Spread check: If best bid is strictly less than our sell limit, matching stops.
-            if (best_bid < price) {
+            if (best_bid < price && price != 0 && price != UINT32_MAX) {
                 break;
             }
 
