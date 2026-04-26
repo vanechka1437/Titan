@@ -78,6 +78,7 @@ class BaseAgent(abc.ABC):
             sides=sides,
             prices=prices,
             qtys=qtys,
+            agent_id=self.agent_id,
             tifs=tifs
         )
 
@@ -95,7 +96,8 @@ class BaseAgent(abc.ABC):
             env_indices=env_indices,
             action_indices=action_indices,
             sides=sides,
-            qtys=qtys
+            qtys=qtys,
+            agent_id=self.agent_id
         )
 
     def submit_cancellations(self,
@@ -110,5 +112,6 @@ class BaseAgent(abc.ABC):
         action_builder.make_cancel_order(
             env_indices=env_indices,
             action_indices=action_indices,
-            order_ids=order_ids
+            order_ids=order_ids,
+            agent_id=self.agent_id
         )
