@@ -72,7 +72,8 @@ class Simulation:
 
     def reset(self) -> Tuple[ShadowLOBView, EventStreamView]:
         """
-        Performs a hardware-level wipe of the simulation state.
+        Performs a hardware-level wipe of the simulation state and 
+        ignites the market by forcing all agents to submit their initial orders.
         
         Returns:
             Tuple containing the LOB and Event viewers for initial observation.
@@ -80,8 +81,20 @@ class Simulation:
         self.engine.reset()
         self.last_times = self.engine.get_current_times()
         
-        # In a real setup, we might want to run a "warmup" phase here 
-        # to populate the LOB with initial liquidity before returning.
+        # =====================================================================
+        # BIG BANG OF AGENT ACTIONS: After reset, all agents are considered "ready" to act.
+        # =====================================================================
+        with torch.inference_mode():
+            self.engine.ready_mask.fill_(1)
+            
+            self.population.poll_and_act(
+                ready_mask=self.engine.ready_mask,
+                lob=self.lob_view,
+                events=self.event_view,
+                active_orders=self.orders_view,
+                action_builder=self.action_builder
+            )
+            
         return self.lob_view, self.event_view
 
     def step(self) -> Tuple[ShadowLOBView, EventStreamView, torch.Tensor]:
