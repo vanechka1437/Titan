@@ -86,6 +86,8 @@ class Simulation:
         # =====================================================================
         with torch.inference_mode():
             self.engine.ready_mask.fill_(1)
+
+            self.action_builder.clear()
             
             self.population.poll_and_act(
                 ready_mask=self.engine.ready_mask,
