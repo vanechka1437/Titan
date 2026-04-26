@@ -3,8 +3,9 @@ from enum import IntEnum
 
 class ActionType(IntEnum):
     LIMIT_ORDER = 0
-    MARKET_ORDER = 1
-    CANCEL_ORDER = 2
+    CANCEL_ORDER = 1 
+    MARKET_ORDER = 2  
+    NO_OP = 3
 
 class Side(IntEnum):
     BID = 0
@@ -33,8 +34,11 @@ class ActionBuilder:
                          tifs: torch.Tensor = None) -> None:
         
         self._actions[env_indices, action_indices, 0] = 0
+        
         self._actions[env_indices, action_indices, 1] = qtys.to(torch.int64)
-        self._actions[env_indices, action_indices, 2] = prices.to(torch.int64)
+        
+        packed_slot2 = prices.to(torch.int64) | (env_indices.to(torch.int64) << 32)
+        self._actions[env_indices, action_indices, 2] = packed_slot2
         
         header = agent_id | (ActionType.LIMIT_ORDER << 16) | (sides.to(torch.int64) << 24)
         self._actions[env_indices, action_indices, 3] = header
@@ -50,7 +54,8 @@ class ActionBuilder:
         self._actions[env_indices, action_indices, 1] = qtys.to(torch.int64)
         
         sentinel_price = torch.where(sides == Side.BID, 4294967295, 0)
-        self._actions[env_indices, action_indices, 2] = sentinel_price
+        packed_slot2 = sentinel_price | (env_indices.to(torch.int64) << 32)
+        self._actions[env_indices, action_indices, 2] = packed_slot2
         
         header = agent_id | (ActionType.MARKET_ORDER << 16) | (sides.to(torch.int64) << 24)
         self._actions[env_indices, action_indices, 3] = header
@@ -63,7 +68,7 @@ class ActionBuilder:
         
         self._actions[env_indices, action_indices, 0] = order_ids.to(torch.int64)
         self._actions[env_indices, action_indices, 1] = 0
-        self._actions[env_indices, action_indices, 2] = 0
+        self._actions[env_indices, action_indices, 2] = (env_indices.to(torch.int64) << 32)
         
         header = agent_id | (ActionType.CANCEL_ORDER << 16)
         self._actions[env_indices, action_indices, 3] = header
