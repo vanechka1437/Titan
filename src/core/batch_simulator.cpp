@@ -279,6 +279,20 @@ void BatchSimulator<ObsDepth>::reset_all() noexcept {
 }
 
 // ============================================================================
+// Network & Hardware Latency Configuration
+// ============================================================================
+template <uint32_t ObsDepth>
+void BatchSimulator<ObsDepth>::set_agent_latencies(uint32_t agent_id, uint64_t ingress_ns, uint64_t egress_ns, uint64_t compute_ns) noexcept {
+    for (uint32_t i = 0; i < num_envs_; ++i) {
+        if (agent_id < num_agents_per_env_) [[likely]] {
+            envs_[i].agents[agent_id].ingress_delay = ingress_ns;
+            envs_[i].agents[agent_id].egress_delay = egress_ns;
+            envs_[i].agents[agent_id].compute_delay = compute_ns;
+        }
+    }
+}
+
+// ============================================================================
 // Explicit Instantiations
 // ============================================================================
 template class BatchSimulator<DEFAULT_OBS_DEPTH>;

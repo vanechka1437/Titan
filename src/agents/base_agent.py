@@ -1,9 +1,17 @@
 import abc
+from dataclasses import dataclass
 import torch
 from typing import Optional
 
 from titan.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView # type: ignore
 from titan.core.actions import ActionBuilder, Side, TimeInForce # type: ignore
+
+@dataclass
+class NetworkConfig:
+    """Agent-level network latency configuration for simulating realistic communication delays."""
+    ingress_ns: int = 0   # Ping from the agent to the exchange
+    egress_ns: int = 0    # Delay in receiving market data
+    compute_ns: int = 0   # Agent's computational delay
 
 class BaseAgent(abc.ABC):
     """
@@ -12,10 +20,11 @@ class BaseAgent(abc.ABC):
     In a vectorized architecture, a single BaseAgent instance physically controls
     the behavior of its role across ALL parallel environments simultaneously.
     """
-    def __init__(self) -> None:
+    def __init__(self, network: Optional[NetworkConfig] = None) -> None:
         # Vectorized agent ID (from 0 to num_agents - 1).
         # Automatically injected by the Simulation Manager (Population) during initialization.
         self.agent_id: int = -1
+        self.network = network or NetworkConfig()
 
     @abc.abstractmethod
     def act(self, 

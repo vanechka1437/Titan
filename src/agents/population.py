@@ -1,9 +1,9 @@
 import torch
 from typing import List, Optional
 
-from titan.agents.base_agent import BaseAgent #type: ignore
-from titan.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView #type: ignore
-from titan.core.actions import ActionBuilder #type: ignore
+from Titan.src.agents.base_agent import BaseAgent
+from Titan.src.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView
+from Titan.src.core.actions import ActionBuilder 
 
 
 class Population:

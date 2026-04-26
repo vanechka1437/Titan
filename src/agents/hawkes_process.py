@@ -2,10 +2,10 @@ import torch
 from dataclasses import dataclass
 from typing import Optional
 
-from titan.agents.base_agent import BaseAgent #type: ignore
-from titan.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView, EventType #type: ignore
-from titan.core.actions import ActionBuilder, Side, TimeInForce #type: ignore
-from titan.core.distributions import Distribution #type: ignore
+from Titan.src.agents.base_agent import BaseAgent, NetworkConfig 
+from Titan.src.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView, EventType 
+from Titan.src.core.actions import ActionBuilder, Side, TimeInForce 
+from Titan.src.core.distributions import Distribution 
 
 @dataclass
 class HawkesZIConfig:
@@ -17,8 +17,8 @@ class HawkesZIConfig:
     default_price_ticks: int = 10000
 
 class HawkesZITrader(BaseAgent):
-    def __init__(self, num_envs: int, config: HawkesZIConfig, device: torch.device = torch.device('cpu')):
-        super().__init__()
+    def __init__(self, num_envs: int, config: HawkesZIConfig, device: torch.device = torch.device('cpu'), network: Optional[NetworkConfig] = None):
+        super().__init__(network)
         self.config = config
         self.device = device
         self.lambdas = torch.full((num_envs,), config.mu, dtype=torch.float32, device=device)
@@ -34,32 +34,22 @@ class HawkesZITrader(BaseAgent):
         if num_active == 0:
             return
 
-        # =====================================================================
-        # 1. СУПЕР-ВЕКТОРИЗОВАННОЕ ОБНОВЛЕНИЕ HAWKES (Без Python циклов!)
-        # =====================================================================
-        # Достаем сырую память событий сразу для всех активных сред
         raw_events = events._events[active_env_indices]
         cursors = events._cursors[active_env_indices].unsqueeze(1)
         max_events = raw_events.shape[1]
         
-        # Создаем матричную маску валидности (отсекаем мусор после курсора кольцевого буфера)
         arange = torch.arange(max_events, device=self.device).unsqueeze(0).expand(num_active, max_events)
         valid_mask = arange < cursors
         
-        # Тип события лежит в младшем байте слота 3. Распаковываем матрично:
         event_types = raw_events[:, :, 3] & 0xFF
         is_trade = (event_types == EventType.TRADE) & valid_mask
         
-        # ОДНА операция sum заменяет 512 итераций цикла!
         trade_counts = is_trade.sum(dim=1).float()
 
         old_lambdas = self.lambdas[active_env_indices]
         new_lambdas = (old_lambdas * self.config.beta) + (trade_counts * self.config.alpha) + self.config.mu
         self.lambdas[active_env_indices] = new_lambdas
 
-        # =====================================================================
-        # 2. ГЕНЕРАЦИЯ ОРДЕРОВ
-        # =====================================================================
         num_orders = torch.poisson(new_lambdas).to(torch.int64)
         num_orders = torch.clamp(num_orders, max=action_builder.max_actions)
         
@@ -73,9 +63,7 @@ class HawkesZITrader(BaseAgent):
         empty_lob_mask = (mid_prices_ticks == 0)
         mid_prices_ticks[empty_lob_mask] = self.config.default_price_ticks
 
-        # =====================================================================
-        # 3. ОТПРАВКА БАТЧЕЙ (В цикле только по max_actions, т.е. максимум 16 раз)
-        # =====================================================================
+        
         for slot in range(max_orders_in_batch):
             slot_mask = num_orders > slot
             target_envs = active_env_indices[slot_mask]

@@ -1,10 +1,13 @@
+from typing import Optional
+
 import torch
 from dataclasses import dataclass
 
-from titan.agents.base_agent import BaseAgent # type: ignore
-from titan.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView # type: ignore
-from titan.core.actions import ActionBuilder, Side # type: ignore
-from titan.core.distributions import Distribution # type: ignore
+from Titan.src.agents.base_agent import NetworkConfig
+from Titan.src.agents.base_agent import BaseAgent 
+from Titan.src.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView
+from Titan.src.core.actions import ActionBuilder, Side 
+from Titan.src.core.distributions import Distribution 
 
 
 @dataclass
@@ -27,14 +30,15 @@ class MomentumTrader(BaseAgent):
     They create heavy-tailed price distributions (fat tails) and market impact by 
     aggressively buying into uptrends and selling into downtrends using Market Orders.
     """
-    def __init__(self, num_envs: int, config: MomentumConfig, device: torch.device = torch.device('cpu')):
+    def __init__(self, num_envs: int, config: MomentumConfig, device: torch.device = torch.device('cpu'), network: Optional[NetworkConfig] = None):
         """
         Args:
             num_envs: Total number of parallel simulation environments.
             config: Momentum strategy hyperparameters.
             device: Target execution device (CPU/CUDA).
+            network: Optional network configuration.
         """
-        super().__init__()
+        super().__init__(network)
         self.config = config
         self.device = device
         

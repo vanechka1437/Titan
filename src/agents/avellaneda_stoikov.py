@@ -3,9 +3,9 @@ import torch
 from dataclasses import dataclass
 from typing import Optional
 
-from titan.agents.base_agent import BaseAgent # type: ignore
-from titan.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView # type: ignore
-from titan.core.actions import ActionBuilder, Side, TimeInForce # type: ignore
+from Titan.src.agents.base_agent import BaseAgent, NetworkConfig 
+from Titan.src.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView 
+from Titan.src.core.actions import ActionBuilder, Side, TimeInForce 
 
 
 @dataclass
@@ -37,14 +37,15 @@ class AvellanedaStoikovMM(BaseAgent):
     def __init__(self, 
                  inventory_tensor: torch.Tensor, 
                  config: AvellanedaStoikovConfig, 
-                 device: torch.device = torch.device('cpu')):
+                 device: torch.device = torch.device('cpu'), 
+                 network: Optional[NetworkConfig] = None):
         """
         Args:
             inventory_tensor: Zero-Copy reference to engine.inventory [num_envs, num_agents]
             config: AS Model hyperparameters.
             device: Target execution device (CPU/CUDA).
         """
-        super().__init__()
+        super().__init__(network)
         self.inventory_tensor = inventory_tensor
         self.config = config
         self.device = device

@@ -175,6 +175,18 @@ class TitanEngine:
         else:
             self._sim.reset(env_indices)
 
+    def set_agent_latencies(self, agent_id: int, ingress_ns: int, egress_ns: int, compute_ns: int) -> None:
+        """
+        Sets the delay (in nanoseconds) for a specific agent.
+
+        Args:
+            agent_id: Agent ID in the simulation
+            ingress_ns: Ping from the agent to the exchange (order arrival delay)
+            egress_ns: Ping from the exchange to the agent (market data delay)
+            compute_ns: Agent's "intelligent" algorithm time (tick calculation delay before a trade)
+        """
+        self._sim.set_agent_latencies(agent_id, ingress_ns, egress_ns, compute_ns)
+
 
     def __del__(self):
         """

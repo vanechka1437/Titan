@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from IPython.display import HTML
 
-from titan.core.views import ShadowLOBView #type: ignore
+from Titan.src.core.views import ShadowLOBView 
 
 class LOBAnimator:
     """

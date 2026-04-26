@@ -126,6 +126,17 @@ NB_MODULE(titan_core, m) {
         
         .def("wait_for_batch", &Sim::wait_for_batch,
              nb::call_guard<nb::gil_scoped_release>())
+
+        // --------------------------------------------------------------------
+        // HARDWARE & NETWORK LATENCY
+        // --------------------------------------------------------------------
+        .def("set_agent_latencies", &Sim::set_agent_latencies,
+             nb::arg("agent_id"), 
+             nb::arg("ingress_ns"), 
+             nb::arg("egress_ns"), 
+             nb::arg("compute_ns"),
+             nb::call_guard<nb::gil_scoped_release>(),
+             "Sets the physical network and compute latencies for a specific agent across all environments.")
              
         // --------------------------------------------------------------------
         // DYNAMIC STATE EXPORTS

@@ -103,6 +103,7 @@ public:
     void reset_all() noexcept;
     
     // Accessors for testing/debugging
+    void set_agent_latencies(uint32_t agent_id, uint64_t ingress_ns, uint64_t egress_ns, uint64_t compute_ns) noexcept;
     [[nodiscard]] inline EnvironmentState<ObsDepth>& get_env(uint32_t env_idx) { return envs_[env_idx]; }
     [[nodiscard]] inline FastScheduler& get_scheduler(uint32_t env_idx) { return schedulers_[env_idx]; }
 };

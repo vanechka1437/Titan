@@ -1,11 +1,14 @@
+from typing import Optional
+
 import torch
 import math
 from dataclasses import dataclass
 
-from titan.agents.base_agent import BaseAgent # type: ignore
-from titan.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView # type: ignore
-from titan.core.actions import ActionBuilder, Side # type: ignore
-from titan.core.distributions import Distribution # type: ignore
+from Titan.src.agents.base_agent import NetworkConfig
+from Titan.src.agents.base_agent import BaseAgent 
+from Titan.src.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView 
+from Titan.src.core.actions import ActionBuilder, Side
+from Titan.src.core.distributions import Distribution 
 
 
 @dataclass
@@ -38,8 +41,8 @@ class FundamentalTrader(BaseAgent):
     3. If the asset is deeply undervalued (Mid < Fair - Threshold), it buys aggressively.
     4. If the asset is deeply overvalued (Mid > Fair + Threshold), it sells aggressively.
     """
-    def __init__(self, num_envs: int, config: FundamentalConfig, device: torch.device = torch.device('cpu')):
-        super().__init__()
+    def __init__(self, num_envs: int, config: FundamentalConfig, device: torch.device = torch.device('cpu'), network: Optional[NetworkConfig] = None):
+        super().__init__(network)
         self.config = config
         self.device = device
         
