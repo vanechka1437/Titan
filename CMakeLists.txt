@@ -94,13 +94,15 @@ endif()
 # Expose to user for manual override and propagate to C++ compiler definitions
 # ==============================================================================
 set(TITAN_SYSTEM_L3_BYTES ${L3_BYTES} CACHE STRING "L3 Cache size in bytes for Engine Hot Zone optimization")
+set(TITAN_SYSTEM_L2_BYTES ${L2_BYTES} CACHE STRING "L2 Cache size in bytes for Engine Hot Zone optimization")
 set(TITAN_SYSTEM_L1_BYTES ${L1_BYTES} CACHE STRING "L1 Data Cache size in bytes for RL ShadowLOB optimization")
 
-message(STATUS "[Titan] Hardware Profile -> L1d Cache: ${TITAN_SYSTEM_L1_BYTES} bytes | L3 Cache: ${TITAN_SYSTEM_L3_BYTES} bytes")
+message(STATUS "[Titan] Hardware Profile -> L1d Cache: ${TITAN_SYSTEM_L1_BYTES} bytes | L2 Cache: ${TITAN_SYSTEM_L2_BYTES} bytes | L3 Cache: ${TITAN_SYSTEM_L3_BYTES} bytes")
 
 # Add the definitions to the compiler flags so they can be read in state.hpp
 add_compile_definitions(
     TITAN_SYSTEM_L3_BYTES=${TITAN_SYSTEM_L3_BYTES}
+    TITAN_SYSTEM_L2_BYTES=${TITAN_SYSTEM_L2_BYTES}
     TITAN_SYSTEM_L1_BYTES=${TITAN_SYSTEM_L1_BYTES}
 )
 
