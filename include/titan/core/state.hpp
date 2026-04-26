@@ -76,7 +76,7 @@ private:
 
     void rehash() {
         std::vector<Entry> old_table = std::move(table_);
-        table_.assign(old_table.empty() ? 4096 : old_table.size() * 2, {EMPTY, 0});
+        table_.assign(old_table.empty() ? 16 : old_table.size() * 2, {EMPTY, 0});
         size_ = 0;
         count_ = 0;
         for (const auto& e : old_table) {
@@ -87,7 +87,9 @@ private:
     }
 
 public:
-    OpenAddressHashMap() { table_.assign(4096, {EMPTY, 0}); }
+    explicit OpenAddressHashMap(uint32_t initial_cap = 16) { 
+        table_.assign(initial_cap, {EMPTY, 0}); 
+    }
 
     inline void add(Price p, OrderQty qty_delta) noexcept {
         if (count_ * 2 >= table_.size())
@@ -166,7 +168,6 @@ public:
 // Fits optimally within the L2 Cache (128 KB for prices/volumes) granting
 // near L1-speeds while mathematically eliminating 99% of window shifts.
 // ============================================================================
-constexpr size_t FINAL_SHADOW_WINDOW = 16384;
 
 }  // namespace detail
 
@@ -179,7 +180,7 @@ constexpr size_t FINAL_SHADOW_WINDOW = 16384;
 // ensures absolute data consistency during flash crashes. Re-centering is
 // strictly O(Delta), guaranteeing flat latency scaling regardless of history.
 // ============================================================================
-template <uint32_t Depth = 20, uint32_t WindowSize = detail::FINAL_SHADOW_WINDOW>
+template <uint32_t Depth = 20, uint32_t WindowSize = std::bit_ceil(Depth * 32)>
 class ShadowLOB {
     static_assert((WindowSize & (WindowSize - 1)) == 0, "WindowSize must be a power of 2");
 
@@ -316,8 +317,8 @@ private:
     }
 
 public:
-    ShadowLOB() = default;
-
+    ShadowLOB() : cold_bids_(std::bit_ceil(Depth)), cold_asks_(std::bit_ceil(Depth)) {}
+    
     // ========================================================================
     // WRITE PATH (Hot Path driven by the Engine Event Dispatcher)
     // Optimized with Unsigned Integer Underflow bounds checking.
