@@ -114,9 +114,11 @@ class AvellanedaStoikovMM(BaseAgent):
         mid_ticks = (mid_valid / lob.tick_size).to(torch.int64)
         
         # Bid cannot cross or touch Ask (must be strictly less than current Ask/Mid)
-        bid_ticks = torch.clamp(bid_ticks, min=self.config.min_price_ticks, max=mid_ticks - 1)
+        bid_ticks = torch.minimum(bid_ticks, mid_ticks - 1)
+        bid_ticks = torch.clamp(bid_ticks, min=self.config.min_price_ticks)
+        
         # Ask cannot cross or touch Bid (must be strictly greater than current Bid/Mid)
-        ask_ticks = torch.max(ask_ticks, mid_ticks + 1)
+        ask_ticks = torch.maximum(ask_ticks, mid_ticks + 1)
         
         # Uniform quantities for this step
         qtys = torch.full((n_targets,), self.config.order_qty, dtype=torch.int64, device=self.device)
