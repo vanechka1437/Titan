@@ -64,7 +64,7 @@ class ShadowLOBView:
         
         return prices, qtys
 
-    def get_midprice(self, env_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def get_midprice(self, env_mask: Optional[torch.Tensor] = None, reference_price: float = 10000.0) -> torch.Tensor:
         """
         Calculates the Mid-Price based on Top-of-Book (L1) states.
         """
@@ -74,6 +74,7 @@ class ShadowLOBView:
         best_ask = data[..., 0, 2].float() * self.tick_size
         
         mid = (best_bid + best_ask) / 2.0
+        mid = torch.where(mid == 0.0, torch.tensor(reference_price, device=mid.device), mid)
         return mid
 
 # =============================================================================
