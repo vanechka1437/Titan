@@ -61,7 +61,7 @@ class MomentumTrader(BaseAgent):
         # =====================================================================
         
         # Extract current Mid-Price
-        current_mids = lob.get_midprice(active_env_indices)[:, self.id]  
+        current_mids = lob.get_midprice(active_env_indices)[:, self.agent_id]  
         
         # Guard against empty Order Books (cannot calculate momentum without prices)
         valid_mid_mask = current_mids > 0

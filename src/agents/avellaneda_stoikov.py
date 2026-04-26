@@ -82,7 +82,7 @@ class AvellanedaStoikovMM(BaseAgent):
         q = self.inventory_tensor[active_env_indices, self.agent_id]
         
         # Extract current Mid-Price (s)
-        mid_float = lob.get_midprice(active_env_indices)[:, self.id]
+        mid_float = lob.get_midprice(active_env_indices)[:, self.agent_id]
         
         # Guard against empty LOBs (mid_price == 0)
         valid_mid_mask = mid_float > 0

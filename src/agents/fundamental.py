@@ -83,7 +83,7 @@ class FundamentalTrader(BaseAgent):
         # 2. PRICE EXTRACTION & DEVIATION CALCULATION
         # =====================================================================
         
-        current_mids_float = lob.get_midprice(active_env_indices)[:, self.id] 
+        current_mids_float = lob.get_midprice(active_env_indices)[:, self.agent_id]
         current_mids_ticks = (current_mids_float / lob.tick_size).to(torch.int64)
         
         # Guard against completely empty limit order books

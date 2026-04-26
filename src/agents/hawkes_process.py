@@ -57,7 +57,7 @@ class HawkesZITrader(BaseAgent):
         if max_orders_in_batch == 0:
             return
 
-        mid_prices_float = lob.get_midprice(active_env_indices)[:, self.id]
+        mid_prices_float = lob.get_midprice(active_env_indices)[:, self.agent_id]
         mid_prices_ticks = (mid_prices_float / lob.tick_size).to(torch.int64)
         
         empty_lob_mask = (mid_prices_ticks == 0)
