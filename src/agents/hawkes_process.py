@@ -51,7 +51,7 @@ class HawkesZITrader(BaseAgent):
         self.lambdas[active_env_indices] = new_lambdas
 
         num_orders = torch.poisson(new_lambdas).to(torch.int64)
-        num_orders = torch.clamp(num_orders, max=action_builder.max_actions)
+        num_orders = torch.clamp(num_orders, max=action_builder.max_actions_per_agent)
         
         max_orders_in_batch = int(num_orders.max().item())
         if max_orders_in_batch == 0:
