@@ -37,7 +37,7 @@ class EngineConfig:
     num_threads: int = os.cpu_count() or 4
     target_batch_size: int = 4096
     max_orders_per_env: int = 4096
-    max_actions_per_step: int = 16
+    max_actions_per_agent: int = 16
     max_events_per_step: int = 256
     max_active_orders_per_agent: int = 128
     obs_depth: int = 20
@@ -67,7 +67,7 @@ class TitanEngine:
             num_envs=config.num_envs,
             num_agents=config.num_agents,
             max_orders_per_env=config.max_orders_per_env,
-            max_actions_per_step=config.max_actions_per_step,
+            max_actions_per_agent=config.max_actions_per_agent,
             max_events_per_step=config.max_events_per_step,
             max_orders_per_agent=config.max_active_orders_per_agent,
             obs_depth=config.obs_depth,
@@ -91,7 +91,7 @@ class TitanEngine:
         # [num_envs, num_agents] - Write 1 to wake up C++ for a specific agent
         self.ready_mask: torch.Tensor = self._arena.ready_mask
         
-        # [num_envs, max_actions_per_step, 4] - 32-byte ActionPayloads
+        # [num_envs, num_agents, max_actions_per_agent, 4] - 32-byte ActionPayloads
         self.actions: torch.Tensor = self._arena.actions
         
         # [num_envs, max_events_per_step, 4] - 32-byte MarketDataEvents (Historical ring buffer)
