@@ -111,13 +111,13 @@ void OrderPoolAllocator::reset() noexcept {
 // ============================================================================
 
 UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
-                                       uint32_t max_orders_per_env, uint32_t max_actions_per_step,
+                                       uint32_t max_orders_per_env, uint32_t max_actions_per_agent,
                                        uint32_t max_events_per_step, uint32_t max_orders_per_agent,
                                        uint32_t obs_depth, std::size_t linear_bytes)
     : num_envs_(num_envs),
       num_agents_(num_agents),
       max_orders_per_env_(max_orders_per_env),
-      max_actions_per_step_(max_actions_per_step),
+      max_actions_per_agent_(max_actions_per_agent),
       max_events_per_step_(max_events_per_step),
       max_orders_per_agent_(max_orders_per_agent),
       obs_depth_(obs_depth),
@@ -129,7 +129,7 @@ UnifiedMemoryArena::UnifiedMemoryArena(uint32_t num_envs, uint32_t num_agents,
     const std::size_t handles_bytes = static_cast<std::size_t>(num_envs) * max_orders_per_env * sizeof(Handle);
     
     const std::size_t ready_mask_bytes = static_cast<std::size_t>(num_envs) * num_agents * sizeof(uint8_t);
-    const std::size_t actions_bytes = static_cast<std::size_t>(num_envs) * max_actions_per_step * sizeof(ActionPayload);
+    const std::size_t actions_bytes = static_cast<std::size_t>(num_envs) * num_agents * max_actions_per_agent * sizeof(ActionPayload);
     const std::size_t events_bytes  = static_cast<std::size_t>(num_envs) * max_events_per_step * sizeof(MarketDataEvent);
     const std::size_t active_orders_bytes = static_cast<std::size_t>(num_envs) * num_agents * max_orders_per_agent * sizeof(ActiveOrderRecord);
     
@@ -216,7 +216,7 @@ UnifiedMemoryArena::~UnifiedMemoryArena() {
 void UnifiedMemoryArena::reset(const std::vector<uint32_t>& env_indices) noexcept {
     // Partial reset for specific environments
     for (const uint32_t env_idx : env_indices) {
-        
+
         // --- SECURITY PATCH: OOB Memory Protection ---
         // Prevents malicious or hallucinating Python agents from corrupting 
         // memory outside the allocated Arena bounds.
@@ -228,14 +228,17 @@ void UnifiedMemoryArena::reset(const std::vector<uint32_t>& env_indices) noexcep
 
         // Size calculation for single environment slices
         const std::size_t ready_mask_slice = num_agents_ * sizeof(uint8_t);
-        const std::size_t actions_slice = max_actions_per_step_ * sizeof(ActionPayload);
+        
+        // Новая логика 4D тензора: (кол-во агентов * макс. экшенов на агента * размер экшена)
+        const std::size_t actions_slice = num_agents_ * max_actions_per_agent_ * sizeof(ActionPayload);
+        
         const std::size_t events_slice  = max_events_per_step_ * sizeof(MarketDataEvent);
         const std::size_t active_orders_slice = num_agents_ * max_orders_per_agent_ * sizeof(ActiveOrderRecord);
         const std::size_t lob_slice = num_agents_ * obs_depth_ * 4 * sizeof(float);
         const std::size_t cash_slice = num_agents_ * sizeof(float);
         const std::size_t inventory_slice = num_agents_ * sizeof(float);
 
-        // Zero out specific environment data
+        // Zero out specific environment data using the correct _ptr members
         std::memset(reinterpret_cast<std::byte*>(ready_mask_ptr_) + (env_idx * ready_mask_slice), 0, ready_mask_slice);
         std::memset(reinterpret_cast<std::byte*>(actions_ptr_) + (env_idx * actions_slice), 0, actions_slice);
         std::memset(reinterpret_cast<std::byte*>(events_ptr_) + (env_idx * events_slice), 0, events_slice);

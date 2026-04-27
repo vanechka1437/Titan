@@ -210,17 +210,26 @@ void BatchSimulator<ObsDepth>::resume_batch() noexcept {
                 env_was_active_in_batch = true;
                 ready_mask[mask_idx] = 0; 
 
-                const std::size_t action_idx = (env_id * arena_->max_actions_per_step()) + agent_id;
-                const ActionPayload& action = actions[action_idx];
+                const std::size_t agent_base_idx = 
+                    (env_id * num_agents_per_env_ * arena_->max_actions_per_agent()) + 
+                    (agent_id * arena_->max_actions_per_agent());
                 
-                if (action.action_type == 3) {
-                    uint64_t next_wakeup = envs_[env_id].current_time + envs_[env_id].agents[agent_id].compute_delay;
-                    schedulers_[env_id].push(ScheduledEvent::make_agent_wakeup(next_wakeup, agent_id));
-                    continue; 
+                bool sent_any_action = false;
+
+                for (uint32_t a_slot = 0; a_slot < arena_->max_actions_per_agent(); ++a_slot) {
+                    const ActionPayload& action = actions[agent_base_idx + a_slot];
+                    
+                    if (action.action_type != 3) { // 3 — это NO_OP
+                        uint64_t arrival_time = envs_[env_id].current_time + envs_[env_id].agents[agent_id].ingress_delay;
+                        schedulers_[env_id].push(ScheduledEvent::make_order_arrival(arrival_time, agent_id, action));
+                        sent_any_action = true;
+                    }
                 }
 
-                uint64_t arrival_time = envs_[env_id].current_time + envs_[env_id].agents[agent_id].ingress_delay;
-                schedulers_[env_id].push(ScheduledEvent::make_order_arrival(arrival_time, agent_id, action));
+                if (!sent_any_action) {
+                    uint64_t next_wakeup = envs_[env_id].current_time + envs_[env_id].agents[agent_id].compute_delay;
+                    schedulers_[env_id].push(ScheduledEvent::make_agent_wakeup(next_wakeup, agent_id));
+                }
             }
         }
 

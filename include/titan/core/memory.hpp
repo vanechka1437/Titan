@@ -101,7 +101,7 @@ private:
     uint32_t num_envs_;
     uint32_t num_agents_;
     uint32_t max_orders_per_env_;
-    uint32_t max_actions_per_step_;
+    uint32_t max_actions_per_agent_;
     uint32_t max_events_per_step_;
     uint32_t max_orders_per_agent_;
     uint32_t obs_depth_;
@@ -166,7 +166,7 @@ public:
     // --- Config Accessors ---
     [[nodiscard]] inline uint32_t num_envs() const noexcept { return num_envs_; }
     [[nodiscard]] inline uint32_t num_agents() const noexcept { return num_agents_; }
-    [[nodiscard]] inline uint32_t max_actions_per_step() const noexcept { return max_actions_per_step_; }
+    [[nodiscard]] inline uint32_t max_actions_per_agent() const noexcept { return max_actions_per_agent_; }
     [[nodiscard]] inline uint32_t max_events_per_step() const noexcept { return max_events_per_step_; }
     [[nodiscard]] inline uint32_t max_orders_per_agent() const noexcept { return max_orders_per_agent_; }
     [[nodiscard]] inline uint32_t max_active_orders() const noexcept { return num_agents_ * max_orders_per_agent_; }

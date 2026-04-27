@@ -24,6 +24,9 @@ using ZeroCopyTensor2D = nb::ndarray<T, nb::pytorch, nb::numpy, nb::ndim<2>, nb:
 template <typename T>
 using ZeroCopyTensor3D = nb::ndarray<T, nb::pytorch, nb::numpy, nb::ndim<3>, nb::c_contig>;
 
+template <typename T>
+using ZeroCopyTensor4D = nb::ndarray<T, nb::pytorch, nb::numpy, nb::ndim<4>, nb::c_contig>;
+
 NB_MODULE(titan_core, m) {
     m.doc() = "Titan HFT Core - Zero-Copy PyTorch RL Environment";
 
@@ -35,12 +38,20 @@ NB_MODULE(titan_core, m) {
              nb::arg("num_envs"),
              nb::arg("num_agents"),
              nb::arg("max_orders_per_env") = 4096,
-             nb::arg("max_actions_per_step") = 16,
+             nb::arg("max_actions_per_agent") = 16, 
              nb::arg("max_events_per_step") = 256,
              nb::arg("max_orders_per_agent") = 128,
              nb::arg("obs_depth") = 20,
-             nb::arg("linear_bytes") = 256 * 1024 * 1024,
-             "Allocates OS-pinned, zero-copy contiguous memory for the entire parallel simulation.")
+             nb::arg("linear_bytes") = 256 * 1024 * 1024)
+        .def_prop_ro("actions", [](UnifiedMemoryArena& a) {
+            size_t shape[4] = { 
+                static_cast<size_t>(a.num_envs()), 
+                static_cast<size_t>(a.num_agents()), 
+                static_cast<size_t>(a.max_actions_per_agent()), 
+                4 
+            };
+            return ZeroCopyTensor4D<int64_t>(reinterpret_cast<int64_t*>(a.actions_ptr()), 4, shape, nb::cast(&a, nb::rv_policy::reference));
+        })
              
         // --------------------------------------------------------------------
         // ZERO-COPY TENSOR EXPORTS (Anchored to the Arena's lifetime)
@@ -50,12 +61,6 @@ NB_MODULE(titan_core, m) {
         .def_prop_ro("ready_mask", [](UnifiedMemoryArena& a) {
             size_t shape[2] = { static_cast<size_t>(a.num_envs()), static_cast<size_t>(a.num_agents()) };
             return ZeroCopyTensor2D<uint8_t>(a.ready_mask_ptr(), 2, shape, nb::cast(&a, nb::rv_policy::reference));
-        })
-        
-        // Shape: [num_envs, max_actions_per_step, 4] -> int64_t
-        .def_prop_ro("actions", [](UnifiedMemoryArena& a) {
-            size_t shape[3] = { static_cast<size_t>(a.num_envs()), static_cast<size_t>(a.max_actions_per_step()), 4 };
-            return ZeroCopyTensor3D<int64_t>(reinterpret_cast<int64_t*>(a.actions_ptr()), 3, shape, nb::cast(&a, nb::rv_policy::reference));
         })
 
         // Shape: [num_envs, max_events_per_step, 4] -> int64_t
