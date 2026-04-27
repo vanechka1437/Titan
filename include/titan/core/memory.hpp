@@ -81,6 +81,10 @@ public:
         // Prefetch the node data to L1 cache.
         _mm_prefetch(reinterpret_cast<const char*>(&nodes_[handle]), _MM_HINT_T0);
 
+        if (++nodes_[handle].generation == 0) [[unlikely]] {
+            nodes_[handle].generation = 1;
+        }
+
         free_list_[head_++] = handle;
     }
 

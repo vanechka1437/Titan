@@ -93,6 +93,7 @@ void OrderPoolAllocator::init(OrderNode* nodes, Handle* free_list, uint32_t capa
         nodes_[i].price = 0;
         nodes_[i].quantity = 0;
         nodes_[i].side = 0;
+        nodes_[i].generation = 1;
     }
 }
 
@@ -103,6 +104,7 @@ void OrderPoolAllocator::reset() noexcept {
         free_list_[i] = static_cast<Handle>(capacity_ - 1 - i);
         nodes_[i].next = NULL_HANDLE;
         nodes_[i].prev = NULL_HANDLE;
+        nodes_[i].generation = 1;
     }
 }
 
