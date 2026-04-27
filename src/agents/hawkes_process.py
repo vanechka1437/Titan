@@ -77,7 +77,6 @@ class HawkesZITrader(BaseAgent):
             qtys = torch.clamp(qtys, min=1)
             
             offsets = self.config.price_offset.sample((n_targets,), self.device).to(torch.int64)
-            offsets = torch.clamp(offsets, min=1)
             
             direction_multiplier = (sides * 2) - 1
             prices_ticks = mid_prices_ticks[slot_mask] + (offsets * direction_multiplier)
