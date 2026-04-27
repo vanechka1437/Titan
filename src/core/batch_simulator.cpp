@@ -219,7 +219,14 @@ void BatchSimulator<ObsDepth>::resume_batch() noexcept {
                 for (uint32_t a_slot = 0; a_slot < arena_->max_actions_per_agent(); ++a_slot) {
                     const ActionPayload& action = actions[agent_base_idx + a_slot];
                     
-                    if (action.action_type != 3) { // 3 — это NO_OP
+                    if (action.action_type != 3) { 
+                        if (env_id == 0) { 
+                            std::cout << "[C++ IN] Agent: " << agent_id 
+                                      << " | Type: " << (int)action.action_type 
+                                      << " | Side: " << (int)action.side 
+                                      << " | Price: " << action.price 
+                                      << " | Qty: " << action.qty << std::endl;
+                        }
                         uint64_t arrival_time = envs_[env_id].current_time + envs_[env_id].agents[agent_id].ingress_delay;
                         schedulers_[env_id].push(ScheduledEvent::make_order_arrival(arrival_time, agent_id, action));
                         sent_any_action = true;

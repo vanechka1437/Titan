@@ -45,7 +45,7 @@ class ActionBuilder:
         self._actions[env_indices, agent_id, action_indices, 2] = packed_slot2
         
         # Pack agent_id, action_type, and side into the header
-        header = agent_id | (ActionType.LIMIT_ORDER << 16) | (sides.to(torch.int64) << 24)
+        header = ActionType.LIMIT_ORDER | (sides.to(torch.int64) << 8) | (agent_id << 16)
         self._actions[env_indices, agent_id, action_indices, 3] = header
 
     def make_market_order(self, 
@@ -63,7 +63,7 @@ class ActionBuilder:
         packed_slot2 = sentinel_price | (env_indices.to(torch.int64) << 32)
         self._actions[env_indices, agent_id, action_indices, 2] = packed_slot2
         
-        header = agent_id | (ActionType.MARKET_ORDER << 16) | (sides.to(torch.int64) << 24)
+        header = ActionType.MARKET_ORDER | (sides.to(torch.int64) << 8) | (agent_id << 16)
         self._actions[env_indices, agent_id, action_indices, 3] = header
 
     def make_cancel_order(self, 
@@ -76,5 +76,5 @@ class ActionBuilder:
         self._actions[env_indices, agent_id, action_indices, 1] = 0
         self._actions[env_indices, agent_id, action_indices, 2] = (env_indices.to(torch.int64) << 32)
         
-        header = agent_id | (ActionType.CANCEL_ORDER << 16)
+        header = ActionType.CANCEL_ORDER | (agent_id << 16)
         self._actions[env_indices, agent_id, action_indices, 3] = header
