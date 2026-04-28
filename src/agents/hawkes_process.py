@@ -4,20 +4,18 @@ from typing import Optional
 
 from Titan.src.agents.base_agent import BaseAgent, NetworkConfig 
 from Titan.src.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView, EventType 
-from Titan.src.core.actions import ActionBuilder, Side, TimeInForce 
+from Titan.src.core.actions import ActionBuilder, Side
 from Titan.src.core.distributions import Distribution 
 
 @dataclass
-class HawkesZIConfig:
+class HawkesNoiseConfig:
     mu: float           
     alpha: float        
     beta: float         
     order_qty: Distribution
-    price_offset: Distribution
-    default_price_ticks: int = 10000
 
-class HawkesZITrader(BaseAgent):
-    def __init__(self, num_envs: int, config: HawkesZIConfig, device: torch.device = torch.device('cpu'), network: Optional[NetworkConfig] = None):
+class HawkesNoiseTrader(BaseAgent):
+    def __init__(self, num_envs: int, config: HawkesNoiseConfig, device: torch.device = torch.device('cpu'), network: Optional[NetworkConfig] = None):
         super().__init__(network)
         self.config = config
         self.device = device
@@ -57,13 +55,6 @@ class HawkesZITrader(BaseAgent):
         if max_orders_in_batch == 0:
             return
 
-        mid_prices_float = lob.get_midprice(active_env_indices)[:, self.agent_id]
-        mid_prices_ticks = (mid_prices_float / lob.tick_size).to(torch.int64)
-        
-        empty_lob_mask = (mid_prices_ticks == 0)
-        mid_prices_ticks[empty_lob_mask] = self.config.default_price_ticks
-
-        
         for slot in range(max_orders_in_batch):
             slot_mask = num_orders > slot
             target_envs = active_env_indices[slot_mask]
@@ -76,18 +67,10 @@ class HawkesZITrader(BaseAgent):
             qtys = self.config.order_qty.sample((n_targets,), self.device).to(torch.int64)
             qtys = torch.clamp(qtys, min=1)
             
-            offsets = self.config.price_offset.sample((n_targets,), self.device).to(torch.int64)
-            
-            direction_multiplier = (sides * 2) - 1
-            prices_ticks = mid_prices_ticks[slot_mask] + (offsets * direction_multiplier)
-            prices_ticks = torch.clamp(prices_ticks, min=1)
-
-            self.submit_limit_orders(
+            self.submit_market_orders(
                 action_builder=action_builder,
                 env_indices=target_envs,
                 action_slot=slot,
                 sides=sides,
-                prices=prices_ticks,
-                qtys=qtys,
-                tifs=torch.full_like(sides, TimeInForce.GTC)
+                qtys=qtys
             )
