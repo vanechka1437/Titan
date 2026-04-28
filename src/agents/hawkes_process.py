@@ -4,7 +4,7 @@ from typing import Optional
 
 from Titan.src.agents.base_agent import BaseAgent, NetworkConfig 
 from Titan.src.core.views import ShadowLOBView, EventStreamView, ActiveOrdersView, EventType 
-from Titan.src.core.actions import ActionBuilder, Side
+from Titan.src.core.actions import ActionBuilder, Side, TimeInForce 
 from Titan.src.core.distributions import Distribution 
 
 @dataclass
@@ -13,6 +13,8 @@ class HawkesNoiseConfig:
     alpha: float        
     beta: float         
     order_qty: Distribution
+    limit_prob: float = 0.5
+    price_offset_ticks: int = 2
 
 class HawkesNoiseTrader(BaseAgent):
     def __init__(self, num_envs: int, config: HawkesNoiseConfig, device: torch.device = torch.device('cpu'), network: Optional[NetworkConfig] = None):
@@ -55,6 +57,9 @@ class HawkesNoiseTrader(BaseAgent):
         if max_orders_in_batch == 0:
             return
 
+        mid_prices = lob.get_midprice(active_env_indices)[:, self.agent_id]
+        mid_ticks = (mid_prices / lob.tick_size).to(torch.int64)
+
         for slot in range(max_orders_in_batch):
             slot_mask = num_orders > slot
             target_envs = active_env_indices[slot_mask]
@@ -67,10 +72,35 @@ class HawkesNoiseTrader(BaseAgent):
             qtys = self.config.order_qty.sample((n_targets,), self.device).to(torch.int64)
             qtys = torch.clamp(qtys, min=1)
             
-            self.submit_market_orders(
-                action_builder=action_builder,
-                env_indices=target_envs,
-                action_slot=slot,
-                sides=sides,
-                qtys=qtys
-            )
+            # Split into Market and Limit orders
+            rand_val = torch.rand((n_targets,), device=self.device)
+            is_limit = rand_val < self.config.limit_prob
+            is_market = ~is_limit
+
+            # Process Market Orders
+            if is_market.any():
+                self.submit_market_orders(
+                    action_builder=action_builder,
+                    env_indices=target_envs[is_market],
+                    action_slot=slot,
+                    sides=sides[is_market],
+                    qtys=qtys[is_market]
+                )
+
+            # Process Limit Orders
+            if is_limit.any():
+                # Side 0 (BUY) -> price = mid - offset
+                # Side 1 (SELL) -> price = mid + offset
+                multiplier = (sides[is_limit] * 2) - 1
+                prices = mid_ticks[slot_mask][is_limit] + (self.config.price_offset_ticks * multiplier)
+                prices = torch.clamp(prices, min=1)
+
+                self.submit_limit_orders(
+                    action_builder=action_builder,
+                    env_indices=target_envs[is_limit],
+                    action_slot=slot,
+                    sides=sides[is_limit],
+                    prices=prices,
+                    qtys=qtys[is_limit],
+                    tifs=torch.full_like(sides[is_limit], TimeInForce.GTC)
+                )
